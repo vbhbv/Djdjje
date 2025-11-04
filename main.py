@@ -7,7 +7,9 @@ import os
 import sys
 import json 
 import yt_dlp # المكتبة الجديدة
-import tempfile # لمعالجة الملفات المؤقتة
+import tempfile 
+from requests.exceptions import Timeout, RequestException 
+from telebot.apihelper import ApiException # لإدارة أخطاء تيليجرام
 
 # ===============================================
 #              0. الإعدادات والثوابت والتهيئة
@@ -17,8 +19,6 @@ import tempfile # لمعالجة الملفات المؤقتة
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
 WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
-
-# تم حذف جميع متغيرات API الخارجية (TIKHUB_KEY, ENDPOINTS)
 
 DEVELOPER_USER_ID = "1315011160"
 CHANNEL_USERNAME = "@SuPeRx1"
@@ -83,67 +83,90 @@ def handle_download_choice(call):
         bot.register_next_step_handler(call.message, process_tiktok_link)
     elif call.data == 'download_instagram':
         bot.register_next_step_handler(call.message, process_instagram_link)
-        
+
 # ===============================================
-#              3. دوال التحميل (باستخدام yt-dlp)
+#              3. دالة متخصصة: التنزيل والإرسال
 # ===============================================
 
+def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
+    """
+    دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
+    تستقبل: chat_id, url, platform_name, loading_msg_id
+    """
+    
+    # 1. إعدادات yt-dlp
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, 'download.mp4')
+        
+        ydl_opts = {
+            'outtmpl': file_path,
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'cookiefile': None,
+            'postprocessors': [{
+                'key': 'FFmpegVideoRemuxer',
+                'prefer_muxer': 'mp4',
+            }],
+        }
+
+        # 2. بدء التنزيل
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # يمكن لـ yt-dlp أن يفشل هنا إذا كان الرابط غير صالح
+            ydl.extract_info(url, download=True) 
+        
+        bot.delete_message(chat_id, loading_msg_id)
+        
+        # 3. الإرسال إلى تيليجرام
+        caption_text = f"✅ تم التحميل من {platform_name} بواسطة: {CHANNEL_USERNAME}" 
+        
+        if os.path.exists(file_path):
+             with open(file_path, 'rb') as f:
+                bot.send_video(
+                    chat_id,
+                    f,
+                    caption=f'<b>{caption_text}</b>', 
+                    parse_mode='HTML',
+                    supports_streaming=True
+                )
+             return True # نجاح الإرسال
+        else:
+             raise Exception("فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل.")
+    
+# ===============================================
+#              4. الدوال الرئيسية (المُتشعّبة)
+# ===============================================
+
+@bot.message_handler(func=lambda m: True)
 def process_tiktok_link(message):
     user_url = message.text
     loading_msg = None
     
+    # التحقق من إلغاء العملية
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
         send_welcome(message) 
         return
-        
+
     try:
-        if not re.match(r'https?://(?:www\.)?tiktok\.com/', user_url):
-            bot.send_message(message.chat.id, "<b>❌ الرابط غير صالح!</b> يرجى التأكد من رابط تيك توك صحيح.", parse_mode='HTML')
-            send_welcome(message) 
-            return
+        # 🚨 تصحيح Regex: قبول tiktok.com و vt.tiktok.com
+        tiktok_regex = r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/'
+        
+        if not re.match(tiktok_regex, user_url):
+            # إذا لم يكن رابط تيك توك، ننتقل للتحقق من إنستجرام
+            return process_instagram_link(message) 
             
-        loading_msg = bot.send_message(message.chat.id, "<strong>⏳ جارٍ التحميل المباشر من تيك توك... قد يستغرق وقتاً.</strong>", parse_mode="html")
-
-        # إنشاء مسار مؤقت لحفظ الملف
-        with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, 'video.mp4')
+        loading_msg = bot.send_message(message.chat.id, "<strong>⏳ جارٍ التحميل المباشر من تيك توك...</strong>", parse_mode="html")
+        
+        # استدعاء الدالة المتخصصة
+        download_media_yt_dlp(
+            message.chat.id,
+            user_url,
+            "تيك توك",
+            loading_msg.message_id
+        )
             
-            # خيارات التنزيل لـ yt-dlp
-            ydl_opts = {
-                'outtmpl': file_path,
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
-                'noplaylist': True,
-                'quiet': True,
-                'no_warnings': True,
-                'cookiefile': None, # لتجنب مشاكل تسجيل الدخول
-                'postprocessors': [{
-                    'key': 'FFmpegVideoRemuxer',
-                    'prefer_muxer': 'mp4',
-                }],
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(user_url, download=True)
-            
-            bot.delete_message(message.chat.id, loading_msg.message_id)
-            
-            caption_text = f"✅ تم التحميل مباشرة بواسطة: {CHANNEL_USERNAME}" 
-            
-            # إرسال الملف المُحمَّل
-            if os.path.exists(file_path):
-                 with open(file_path, 'rb') as f:
-                    bot.send_video(
-                        message.chat.id,
-                        f,
-                        caption=f'<b>{caption_text}</b>', 
-                        parse_mode='HTML',
-                        supports_streaming=True
-                    )
-            else:
-                 raise Exception("فشل yt-dlp في استخراج المسار أو التنزيل.")
-
-
     except Exception as e:
         print(f"=====================================================")
         print(f"❌ خطأ حرج في معالجة تيك توك (yt-dlp): {e}") 
@@ -152,59 +175,40 @@ def process_tiktok_link(message):
         if loading_msg:
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء التحميل المباشر: <b>{e}</b>", parse_mode='HTML')
         
-    bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
+        error_msg = str(e).split('\n')[0] # أخذ أول سطر من الخطأ
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل تيك توك: <b>{error_msg}</b>", parse_mode='HTML')
+        
+    finally:
+        bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
-# -------------------
-# دالة إنستجرام (باستخدام yt-dlp)
-# -------------------
 
 def process_instagram_link(message):
     user_url = message.text
     loading_msg = None
+    
+    # التحقق من إلغاء العملية (هذا التحقق تم بالفعل في الدالة السابقة، لكن لضمان الثبات)
     if user_url.startswith('/'):
-        bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
-        send_welcome(message) 
-        return
-        
-    try:
-        if not re.match(r'https?://(?:www\.)?instagram\.com/', user_url):
-            bot.send_message(message.chat.id, "<b>❌ الرابط غير صالح!</b> يرجى التأكد من رابط إنستجرام صحيح.", parse_mode='HTML')
-            send_welcome(message)
-            return
+        return # تم التعامل معه في الدالة السابقة
 
+    try:
+        # 🚨 تصحيح Regex: قبول الروابط القياسية (reel, p, tv)
+        instagram_regex = r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/'
+        
+        if not re.match(instagram_regex, user_url):
+            # إذا لم يكن أي من الروابط، نرسل رسالة خطأ واحدة
+            bot.send_message(message.chat.id, "❌ **الرابط غير صالح!** يرجى إرسال رابط تيك توك أو إنستجرام صحيح ومتاح للعامة.", parse_mode='HTML')
+            return send_welcome(message) # نعود إلى البداية بعد رسالة الخطأ
+            
         loading_msg = bot.send_message(message.chat.id, f"""<strong>⏳ جارٍ التحميل المباشر من إنستجرام...</strong>""", parse_mode="html")
         
-        with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, 'video.mp4')
-            
-            ydl_opts = {
-                'outtmpl': file_path,
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
-                'noplaylist': True,
-                'quiet': True,
-                'no_warnings': True,
-                'cookiefile': None, # مهم لبعض المحتوى العام
-                'postprocessors': [{
-                    'key': 'FFmpegVideoRemuxer',
-                    'prefer_muxer': 'mp4',
-                }],
-            }
-        
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(user_url, download=True)
-
-        bot.delete_message(message.chat.id, loading_msg.message_id) 
-        
-        caption_text = f"✅ تم التحميل مباشرة بواسطة: {CHANNEL_USERNAME}" 
-
-        if os.path.exists(file_path):
-             with open(file_path, 'rb') as f:
-                bot.send_video(message.chat.id, f, caption=f"<b>{caption_text}</b>", parse_mode='HTML', supports_streaming=True)
-        else:
-             raise Exception("فشل yt-dlp في استخراج المسار أو التنزيل.")
-
+        # استدعاء الدالة المتخصصة
+        download_media_yt_dlp(
+            message.chat.id,
+            user_url,
+            "إنستجرام",
+            loading_msg.message_id
+        )
 
     except Exception as e:
         print(f"=====================================================")
@@ -214,13 +218,16 @@ def process_instagram_link(message):
         if loading_msg:
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء التحميل المباشر: <b>{e}</b>", parse_mode='HTML')
+
+        error_msg = str(e).split('\n')[0] 
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل إنستجرام: <b>{error_msg}</b>", parse_mode='HTML')
         
-    bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
+    finally:
+        bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 
 # ===============================================
-#              4. تهيئة Webhook
+#              5. تهيئة Webhook
 # ===============================================
 
 if __name__ == '__main__':
