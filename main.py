@@ -23,6 +23,9 @@ WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN)
 DEVELOPER_USER_ID = "1315011160"
 CHANNEL_USERNAME = "@SuPeRx1"
 
+# 🚨 الحل لمشكلة 'BUTTON_DATA_INVALID': لتخزين الروابط مؤقتاً باستخدام message_id كمفتاح
+LINK_STORAGE = {} 
+
 # التهيئة
 try:
     bot = telebot.TeleBot(BOT_TOKEN)
@@ -83,7 +86,6 @@ def handle_download_choice(call):
         text=f"""<b>🚀 أرسل رابط فيديو {platform} الآن!</b>""",
         parse_mode='HTML' 
     )
-    # نمرر المفتاح لتحديد نوع المعالجة لاحقاً
     call.message.platform_key = platform_key 
     bot.register_next_step_handler(call.message, process_user_link)
 
@@ -94,12 +96,11 @@ def handle_download_choice(call):
 def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id, download_as_mp3=False):
     """
     دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
-    تشمل خيار التحويل إلى MP3.
+    تستخدم مسار مؤقت لضمان حذف الملفات بعد الإرسال.
     """
     
     # 🧹 الضمانة التقنية للحذف التلقائي
     with tempfile.TemporaryDirectory() as tmpdir:
-        # تحديد اسم الملف واللاحقة بناءً على خيار MP3
         output_ext = 'mp3' if download_as_mp3 else 'mp4'
         file_path = os.path.join(tmpdir, f'download.{output_ext}')
         
@@ -109,13 +110,12 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id, download_
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            # استراتيجية التحميل/التحويل
+            # استراتيجية التحميل/التحويل (حل مشكلة ffmpeg لغير الـ MP3)
             'format': 'bestaudio/best' if download_as_mp3 else 'best[ext=mp4]/best',
         }
         
-        # إضافة خيارات التحويل لـ MP3
+        # إضافة خيارات التحويل لـ MP3 (تتطلب وجود ffmpeg)
         if download_as_mp3:
-             # تتطلب هذه الخيارات وجود ffmpeg (الذي تم تثبيته في Procfile)
              ydl_opts['postprocessors'] = [{
                  'key': 'FFmpegExtractAudio',
                  'preferredcodec': 'mp3',
@@ -135,10 +135,8 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id, download_
         if os.path.exists(file_path):
              with open(file_path, 'rb') as f:
                 if download_as_mp3:
-                    # إرسال كملف صوتي
                     bot.send_audio(chat_id, f, caption=f'<b>{caption_text}</b>', parse_mode='HTML')
                 else:
-                    # إرسال كملف فيديو
                     bot.send_video(chat_id, f, caption=f'<b>{caption_text}</b>', parse_mode='HTML', supports_streaming=True)
              return True
         else:
@@ -152,14 +150,14 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id, download_
 def process_user_link(message):
     user_url = message.text
     loading_msg = None
-    platform_key = getattr(message, 'platform_key', None) # الحصول على المنصة من الخطوة السابقة
+    platform_key = getattr(message, 'platform_key', None) 
     
     # 1. التحقق من إلغاء العملية
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
         return send_welcome(message)
 
-    # 2. تحديد المنصة بناءً على الرابط (في حال لم يتم تحديدها مسبقاً)
+    # 2. تحديد المنصة بناءً على الرابط
     if not platform_key:
         if re.match(r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/', user_url):
             platform_key = 'tiktok'
@@ -175,12 +173,19 @@ def process_user_link(message):
     platform_name = platforms[platform_key]
     
     try:
-        # 3. إرسال خيار التحويل لليوتيوب فقط
+        # 3. إرسال خيار التحويل لليوتيوب فقط (الحل لمشكلة BUTTON_DATA_INVALID)
         if platform_key == 'youtube':
+            
+            # 🚨 تخزين الرابط واستخدام message_id كمفتاح
+            message_id_key = str(message.message_id) 
+            LINK_STORAGE[message_id_key] = user_url 
+            
             markup = types.InlineKeyboardMarkup()
-            vid_btn = types.InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{user_url}")
-            aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{user_url}")
+            # تمرير المفتاح القصير بدلاً من الرابط الطويل
+            vid_btn = types.InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{message_id_key}")
+            aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{message_id_key}")
             markup.add(vid_btn, aud_btn)
+            
             bot.send_message(message.chat.id, f"✅ تم التعرف على رابط {platform_name}. الرجاء اختيار صيغة التحميل:", reply_markup=markup, parse_mode='HTML')
             return
             
@@ -211,17 +216,31 @@ def process_user_link(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('final_dl_'))
 def handle_final_download(call):
-    # final_dl_platform_type_url
+    # final_dl_platform_type_message_id_key
     parts = call.data.split('_')
     platform_key = parts[2]
     media_type = parts[3] # 'video' or 'audio'
-    user_url = "_".join(parts[4:]) 
+    message_id_key = parts[4] # مفتاح الرسالة
     
+    # 🚨 استرداد الرابط من المخزن وحذفه منه
+    user_url = LINK_STORAGE.pop(message_id_key, None) 
+    
+    if not user_url:
+        bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط أو تم تحميله مسبقاً.")
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"❌ انتهت صلاحية التحميل. اضغط /start للبدء مجدداً.",
+            parse_mode='HTML'
+        )
+        return
+
     platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
     platform_name = platforms[platform_key]
     download_as_mp3 = (media_type == 'audio')
     
     try:
+        # 1. تحديث رسالة التحميل
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
@@ -229,7 +248,7 @@ def handle_final_download(call):
             parse_mode='HTML'
         )
         
-        # استدعاء دالة التنزيل المتخصصة
+        # 2. استدعاء دالة التنزيل المتخصصة
         download_media_yt_dlp(
             call.message.chat.id,
             user_url,
@@ -239,6 +258,7 @@ def handle_final_download(call):
         )
         
     except Exception as e:
+        # 3. معالجة الأخطاء
         print(f"=====================================================")
         print(f"❌ خطأ حرج في التحميل النهائي {platform_name}: {e}") 
         print(f"=====================================================")
@@ -247,6 +267,7 @@ def handle_final_download(call):
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
         
     finally:
+        # 4. إنهاء العملية
         bot.send_message(call.message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 # ===============================================
