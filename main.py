@@ -23,8 +23,29 @@ WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN)
 DEVELOPER_USER_ID = "1315011160"
 CHANNEL_USERNAME = "@SuPeRx1"
 
-# 🚨 الحل لمشكلة 'BUTTON_DATA_INVALID': لتخزين الروابط مؤقتاً باستخدام message_id كمفتاح
-LINK_STORAGE = {} 
+# 🚨 الحل لمشكلة "انتهت صلاحية التحميل": استخدام ملف JSON للتخزين الدائم
+TEMP_STORAGE_FILE = 'temp_links.json' 
+
+# دالة لقراءة الروابط من الملف
+def load_links():
+    """تحميل جميع الروابط المخزنة من ملف JSON."""
+    if os.path.exists(TEMP_STORAGE_FILE):
+        try:
+            with open(TEMP_STORAGE_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {}
+    return {}
+
+# دالة لحفظ الروابط في الملف
+def save_links(data):
+    """حفظ الروابط الحالية إلى ملف JSON."""
+    try:
+        with open(TEMP_STORAGE_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"❌ فشل حفظ البيانات في ملف JSON: {e}")
+
 
 # التهيئة
 try:
@@ -173,12 +194,15 @@ def process_user_link(message):
     platform_name = platforms[platform_key]
     
     try:
-        # 3. إرسال خيار التحويل لليوتيوب فقط (الحل لمشكلة BUTTON_DATA_INVALID)
+        # 3. إرسال خيار التحويل لليوتيوب فقط (الحل لمشكلة BUTTON_DATA_INVALID + انتهاء الصلاحية)
         if platform_key == 'youtube':
             
-            # 🚨 تخزين الرابط واستخدام message_id كمفتاح
+            # 🚨 تخزين الرابط في ملف JSON واستخدام message_id كمفتاح
             message_id_key = str(message.message_id) 
-            LINK_STORAGE[message_id_key] = user_url 
+            
+            links = load_links()
+            links[message_id_key] = user_url
+            save_links(links) 
             
             markup = types.InlineKeyboardMarkup()
             # تمرير المفتاح القصير بدلاً من الرابط الطويل
@@ -222,8 +246,10 @@ def handle_final_download(call):
     media_type = parts[3] # 'video' or 'audio'
     message_id_key = parts[4] # مفتاح الرسالة
     
-    # 🚨 استرداد الرابط من المخزن وحذفه منه
-    user_url = LINK_STORAGE.pop(message_id_key, None) 
+    # 🚨 استرداد الرابط من ملف JSON وحذفه منه
+    links = load_links()
+    user_url = links.pop(message_id_key, None) 
+    save_links(links) # حفظ التغيير (حذف الرابط)
     
     if not user_url:
         bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط أو تم تحميله مسبقاً.")
