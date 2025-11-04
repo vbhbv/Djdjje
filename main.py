@@ -83,29 +83,27 @@ def handle_download_choice(call):
     bot.register_next_step_handler(call.message, process_user_link)
     
 # ===============================================
-#              3. دالة متخصصة: التنزيل والإرسال (قلب البوت)
+#              3. دالة متخصصة: التنزيل والإرسال (حل مشكلة ffmpeg)
 # ===============================================
 
 def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
     """
     دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
-    تضمن هذه الدالة إزالة الملفات بعد الإرسال.
+    تستخدم مسار مؤقت لضمان حذف الملفات بعد الإرسال.
     """
     
-    # 🧹 الضمانة التقنية للحذف التلقائي:
-    # عند الخروج من نطاق 'with tempfile.TemporaryDirectory() as tmpdir:'، يتم حذف المجلد وكل ما فيه.
+    # 🧹 الضمانة التقنية للحذف التلقائي: يتم حذف المجلد وكل ما فيه عند الخروج من نطاق 'with'.
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, 'download.mp4')
         
         ydl_opts = {
             'outtmpl': file_path,
-            # صيغة الدمج التي تتطلب ffmpeg (تم التثبيت في Procfile)
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
+            # 🚨 الاستراتيجية المُصحَّحة: طلب أفضل صيغة مدمجة (MP4) لتجنب الاعتماد على تثبيت ffmpeg
+            'format': 'best[ext=mp4]/best', 
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            'allow_codec_merging': True, # للسماح بدمج الفيديو والصوت في إنستجرام
         }
 
         # بدء التنزيل
@@ -127,7 +125,6 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
                     parse_mode='HTML',
                     supports_streaming=True
                 )
-             # بمجرد الخروج من 'with tempfile.TemporaryDirectory()' يتم حذف الملف
              return True
         else:
              raise Exception("فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل.")
