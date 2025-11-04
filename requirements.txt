@@ -2,4 +2,6 @@ pytelegrambotapi
 flask
 requests
 gunicorn
-yt-dlp 
+yt-dlp
+ffmpeg-python
+
