@@ -6,10 +6,10 @@ import re
 import os 
 import sys
 import json 
-import yt_dlp # المكتبة الجديدة
+import yt_dlp # المكتبة الأساسية للتنزيل
 import tempfile 
 from requests.exceptions import Timeout, RequestException 
-from telebot.apihelper import ApiException # لإدارة أخطاء تيليجرام
+from telebot.apihelper import ApiException 
 
 # ===============================================
 #              0. الإعدادات والثوابت والتهيئة
@@ -79,22 +79,16 @@ def handle_download_choice(call):
         text=f"""<b>🚀 أرسل رابط فيديو {platform} الآن!</b>""",
         parse_mode='HTML' 
     )
-    if call.data == 'download_tiktok':
-        bot.register_next_step_handler(call.message, process_tiktok_link)
-    elif call.data == 'download_instagram':
-        bot.register_next_step_handler(call.message, process_instagram_link)
-
+    # نستخدم نفس الدالة لمعالجة جميع الروابط
+    bot.register_next_step_handler(call.message, process_user_link)
+    
 # ===============================================
 #              3. دالة متخصصة: التنزيل والإرسال
 # ===============================================
 
 def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
-    """
-    دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
-    تستقبل: chat_id, url, platform_name, loading_msg_id
-    """
+    """دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف."""
     
-    # 1. إعدادات yt-dlp
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, 'download.mp4')
         
@@ -105,20 +99,16 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            'postprocessors': [{
-                'key': 'FFmpegVideoRemuxer',
-                'prefer_muxer': 'mp4',
-            }],
+            # 🛑 تم حذف postprocessors لحل مشكلة 'prefer_muxer' 🛑
         }
 
-        # 2. بدء التنزيل
+        # بدء التنزيل
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # يمكن لـ yt-dlp أن يفشل هنا إذا كان الرابط غير صالح
             ydl.extract_info(url, download=True) 
         
         bot.delete_message(chat_id, loading_msg_id)
         
-        # 3. الإرسال إلى تيليجرام
+        # الإرسال إلى تيليجرام
         caption_text = f"✅ تم التحميل من {platform_name} بواسطة: {CHANNEL_USERNAME}" 
         
         if os.path.exists(file_path):
@@ -130,99 +120,66 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
                     parse_mode='HTML',
                     supports_streaming=True
                 )
-             return True # نجاح الإرسال
+             return True
         else:
              raise Exception("فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل.")
     
 # ===============================================
-#              4. الدوال الرئيسية (المُتشعّبة)
+#              4. الدالة الرئيسية الموحدة للمعالجة
 # ===============================================
 
 @bot.message_handler(func=lambda m: True)
-def process_tiktok_link(message):
+def process_user_link(message):
     user_url = message.text
     loading_msg = None
     
     # التحقق من إلغاء العملية
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
-        send_welcome(message) 
-        return
-
+        return send_welcome(message)
+        
     try:
-        # 🚨 تصحيح Regex: قبول tiktok.com و vt.tiktok.com
+        # 🚨 Regex المُحسَّن: التحقق من المنصة
         tiktok_regex = r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/'
-        
-        if not re.match(tiktok_regex, user_url):
-            # إذا لم يكن رابط تيك توك، ننتقل للتحقق من إنستجرام
-            return process_instagram_link(message) 
-            
-        loading_msg = bot.send_message(message.chat.id, "<strong>⏳ جارٍ التحميل المباشر من تيك توك...</strong>", parse_mode="html")
-        
-        # استدعاء الدالة المتخصصة
-        download_media_yt_dlp(
-            message.chat.id,
-            user_url,
-            "تيك توك",
-            loading_msg.message_id
-        )
-            
-    except Exception as e:
-        print(f"=====================================================")
-        print(f"❌ خطأ حرج في معالجة تيك توك (yt-dlp): {e}") 
-        print(f"=====================================================")
-        
-        if loading_msg:
-             try: bot.delete_message(message.chat.id, loading_msg.message_id) 
-             except: pass 
-        
-        error_msg = str(e).split('\n')[0] # أخذ أول سطر من الخطأ
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل تيك توك: <b>{error_msg}</b>", parse_mode='HTML')
-        
-    finally:
-        bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
-
-
-def process_instagram_link(message):
-    user_url = message.text
-    loading_msg = None
-    
-    # التحقق من إلغاء العملية (هذا التحقق تم بالفعل في الدالة السابقة، لكن لضمان الثبات)
-    if user_url.startswith('/'):
-        return # تم التعامل معه في الدالة السابقة
-
-    try:
-        # 🚨 تصحيح Regex: قبول الروابط القياسية (reel, p, tv)
         instagram_regex = r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/'
         
-        if not re.match(instagram_regex, user_url):
-            # إذا لم يكن أي من الروابط، نرسل رسالة خطأ واحدة
+        platform_name = None
+        
+        if re.match(tiktok_regex, user_url):
+            platform_name = "تيك توك"
+        elif re.match(instagram_regex, user_url):
+            platform_name = "إنستجرام"
+        else:
             bot.send_message(message.chat.id, "❌ **الرابط غير صالح!** يرجى إرسال رابط تيك توك أو إنستجرام صحيح ومتاح للعامة.", parse_mode='HTML')
-            return send_welcome(message) # نعود إلى البداية بعد رسالة الخطأ
+            return send_welcome(message)
             
-        loading_msg = bot.send_message(message.chat.id, f"""<strong>⏳ جارٍ التحميل المباشر من إنستجرام...</strong>""", parse_mode="html")
+        # إرسال رسالة جاري التحميل
+        loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name}...</strong>", parse_mode="html")
         
         # استدعاء الدالة المتخصصة
         download_media_yt_dlp(
             message.chat.id,
             user_url,
-            "إنستجرام",
+            platform_name,
             loading_msg.message_id
         )
-
+            
     except Exception as e:
+        # طباعة الخطأ بوضوح شديد في سجلات Railway
         print(f"=====================================================")
-        print(f"❌ خطأ حرج في معالجة إنستجرام (yt-dlp): {e}") 
+        print(f"❌ خطأ حرج في معالجة {platform_name or 'التحميل'}: {e}") 
         print(f"=====================================================")
         
         if loading_msg:
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
-
+        
+        # عرض أول سطر من الخطأ فقط للمستخدم ليكون مفهومًا
         error_msg = str(e).split('\n')[0] 
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل إنستجرام: <b>{error_msg}</b>", parse_mode='HTML')
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name or 'الملف'}: <b>{error_msg}</b>", parse_mode='HTML')
         
     finally:
+        # التأكد من العودة للقائمة الرئيسية
         bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 
