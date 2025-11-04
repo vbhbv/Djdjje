@@ -9,23 +9,36 @@ import json
 from datetime import datetime
 from collections import defaultdict
 
-# 🚨 استيراد جميع الدوال من ملف التحميل الخارجي
+# 🚨 استيراد جميع الدوال من ملف التحميل الخارجي (يفترض وجوده)
 from handlers.download import download_media_yt_dlp, load_links, save_links
 
 # ===============================================
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة المتغيرات البيئية
+# قراءة المتغيرات البيئية (التأكد من وجودها)
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN غير موجود. تأكد من ضبط المتغير البيئي.")
+if not WEBHOOK_URL_BASE:
+    raise ValueError("❌ WEBHOOK_URL غير موجود. تأكد من ضبط المتغير البيئي.")
+
 WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
 
-# --- تحديث: الثوابت الجديدة للمطور والقناة ---
-DEVELOPER_USER_ID = "6166700051" # تم تحديث ID المطور
+# --- الثوابت للمطور والقناة ---
+DEVELOPER_USER_ID = "6166700051" # ID المطور الخاص بك
 CHANNEL_USERNAME = "@iiollr"      # القناة المطلوبة للاشتراك
-STATS_FILE = "stats.json"         # ملف حفظ الإحصائيات
 # ===============================================
+
+# ----------------- الإحصائيات المؤقتة -----------------
+# 🚨 ملاحظة: تم استبدال Firebase بمتغيرات داخلية. هذه الإحصائيات لن تحفظ بعد إعادة تشغيل البوت.
+TEMP_STATS = {
+    "total_downloads": 0,
+    "users": {} # {user_id: {data}}
+}
+# ----------------- نهاية الإحصائيات المؤقتة -----------------
 
 # التهيئة
 try:
@@ -35,56 +48,52 @@ except Exception as e:
     print(f"❌ فشل تهيئة البوت/Flask. الخطأ: {e}")
 
 # ===============================================
-#              1. دوال الإحصائيات (Stats)
+#              1. دوال الإحصائيات (غير دائمة)
 # ===============================================
 
-def load_stats():
-    """تحميل الإحصائيات من ملف JSON."""
-    if not os.path.exists(STATS_FILE):
-        return {"total_downloads": 0, "users": {}}
-    try:
-        with open(STATS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"❌ خطأ في تحميل الإحصائيات: {e}")
-        return {"total_downloads": 0, "users": {}}
-
-def save_stats(stats):
-    """حفظ الإحصائيات إلى ملف JSON."""
-    try:
-        with open(STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(stats, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        print(f"❌ خطأ في حفظ الإحصائيات: {e}")
-
-def update_user_stats(user_data, platform_key):
-    """تحديث إحصائيات مستخدم محدد وزيادة عدد التنزيلات الإجمالي."""
-    stats = load_stats()
+def register_user(user_data):
+    """تسجيل أو تحديث بيانات المستخدم في الذاكرة المؤقتة."""
     user_id = str(user_data.id)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # تحديث بيانات المستخدم
-    user_entry = stats['users'].get(user_id, {
+    user_entry = TEMP_STATS['users'].get(user_id, {
         "first_name": user_data.first_name,
-        "username": user_data.username,
+        "username": user_data.username or "",
         "join_date": now_str,
         "download_count": 0,
-        "platform_downloads": defaultdict(int) 
+        "platform_downloads": {} 
     })
     
-    # تحديث عداد التنزيلات لهذا المستخدم والمنصة
+    # تحديث بيانات المستخدم
+    user_entry['last_activity'] = now_str
+    user_entry['first_name'] = user_data.first_name
+    user_entry['username'] = user_data.username or ""
+
+    TEMP_STATS['users'][user_id] = user_entry
+    # لا نحتاج للحفظ الخارجي، فقط تحديث الذاكرة
+
+def update_download_stats(user_data, platform_key):
+    """تحديث عدادات التحميل للمستخدم والإجمالي في الذاكرة المؤقتة."""
+    user_id = str(user_data.id)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # تحديث الإحصائيات العامة
+    TEMP_STATS['total_downloads'] += 1
+    
+    # تحديث إحصائيات المستخدم
+    user_entry = TEMP_STATS['users'].get(user_id)
+    if not user_entry:
+        # إذا لم يكن مسجلاً لسبب ما، نسجله الآن
+        register_user(user_data)
+        user_entry = TEMP_STATS['users'][user_id]
+        
     user_entry['download_count'] += 1
     user_entry['last_activity'] = now_str
     
-    # لضمان التحويل الصحيح عند التحميل من الملف (defaultdict لا يعمل مع JSON مباشرة)
+    # تحديث عداد المنصة
     platform_downloads = user_entry.get('platform_downloads', {})
     platform_downloads[platform_key] = platform_downloads.get(platform_key, 0) + 1
-    user_entry['platform_downloads'] = dict(platform_downloads)
-
-    stats['users'][user_id] = user_entry
-    stats['total_downloads'] = stats.get('total_downloads', 0) + 1
-    
-    save_stats(stats)
+    user_entry['platform_downloads'] = platform_downloads
 
 
 # ===============================================
@@ -92,15 +101,13 @@ def update_user_stats(user_data, platform_key):
 # ===============================================
 
 def is_subscribed(user_id):
-    """التحقق مما إذا كان المستخدم مشتركًا في القناة الإجبارية."""
+    """التحقق مما إذا كان المستخدم مشتركًا في القناة الإجبارية (باستخدام تيليجرام API)."""
     try:
         member = bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        # إذا كان العضو ليس "left" أو "banned"، فهو مشترك
         if member.status not in ['left', 'banned']:
             return True
         return False
     except Exception as e:
-        # غالباً يحدث خطأ إذا كانت القناة خاصة أو اسم المستخدم خاطئ
         print(f"❌ خطأ في التحقق من الاشتراك: {e}")
         return False
 
@@ -124,12 +131,10 @@ def check_subscription_callback(call):
     """معالجة النقر على زر 'تحقق من الاشتراك'."""
     if is_subscribed(call.from_user.id):
         bot.answer_callback_query(call.id, "✅ تم التحقق بنجاح! يمكنك الآن إرسال الرابط.")
-        # تحديث الرسالة لتبدو كأنها صفحة الترحيب مجدداً
+        bot.delete_message(call.message.chat.id, call.message.message_id)
         send_welcome(call.message)
     else:
         bot.answer_callback_query(call.id, "❌ لم يتم العثور على اشتراكك بعد. يرجى الاشتراك والمحاولة مجدداً.")
-        # إعادة إرسال رسالة الاشتراك لضمان ظهور الأزرار
-        send_force_subscribe_message(call.message.chat.id)
 
 
 # ===============================================
@@ -138,33 +143,36 @@ def check_subscription_callback(call):
 
 @bot.message_handler(commands=["admin"])
 def admin_panel(message):
-    """عرض لوحة التحكم والإحصائيات للمطور فقط."""
+    """عرض لوحة التحكم والإحصائيات للمطور فقط (إحصائيات مؤقتة)."""
     if str(message.chat.id) != DEVELOPER_USER_ID:
         bot.send_message(message.chat.id, "❌ غير مصرح لك بالوصول إلى لوحة التحكم.", parse_mode='HTML')
         return
 
-    stats = load_stats()
+    # استخدام الإحصائيات المؤقتة
+    stats = TEMP_STATS
     total_users = len(stats['users'])
     total_downloads = stats['total_downloads']
     
     # حساب أعلى المستخدمين تنزيلاً
     sorted_users = sorted(
-        stats['users'].items(), 
-        key=lambda item: item[1]['download_count'], 
+        stats['users'].values(), 
+        key=lambda user: user.get('download_count', 0), 
         reverse=True
-    )[:5] # أعلى 5 مستخدمين
+    )[:5] 
 
     # بناء رسالة التقرير
-    report = f"📊 **لوحة تحكم وإحصائيات البوت**\n\n"
-    report += f"👤 **إجمالي المستخدمين:** {total_users}\n"
-    report += f"📥 **إجمالي التنزيلات:** {total_downloads}\n"
+    report = f"📊 **لوحة تحكم وإحصائيات البوت (مؤقتة)**\n"
+    report += f"⚠️ **ملاحظة:** هذه الإحصائيات تختفي عند إعادة التشغيل.\n\n"
+    report += f"👤 **إجمالي المستخدمين (في هذه الدورة):** {total_users}\n"
+    report += f"📥 **إجمالي التنزيلات (في هذه الدورة):** {total_downloads}\n"
     report += f"🔗 **القناة الإجبارية:** {CHANNEL_USERNAME}\n"
     
     report += f"\n🏆 **أعلى 5 مستخدمين تنزيلاً:**\n"
     if sorted_users:
-        for user_id, user_data in sorted_users:
-            username = f"@{user_data.get('username')}" if user_data.get('username') else user_data.get('first_name', 'مستخدم مجهول')
-            report += f"  - {username} (ID: <code>{user_id}</code>): {user_data['download_count']} تنزيل.\n"
+        for user_data in sorted_users:
+            username = f"@{user_data.get('username')}" if user_data.get('username') else user_data.get('first_name', 'مجهول')
+            # لا نعرض ID المستخدم لحماية البيانات في هذا الوضع المؤقت
+            report += f"  - {username}: {user_data.get('download_count', 0)} تنزيل.\n"
     else:
         report += "  (لا توجد إحصائيات مستخدمين بعد.)\n"
         
@@ -172,8 +180,9 @@ def admin_panel(message):
 
     bot.send_message(message.chat.id, report, parse_mode='HTML')
 
+
 # ===============================================
-#              4. نقاط وصول Webhook (متبقية كما هي)
+#              4. نقاط وصول Webhook
 # ===============================================
 
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
@@ -196,19 +205,19 @@ def webhook():
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-    # لا داعي لإعادة فحص الاشتراك هنا، سيتم فحصه عند إرسال الرابط الفعلي
     first_name = message.from_user.first_name if message.from_user else "صديقنا"
+    
+    # تسجيل المستخدم في الذاكرة المؤقتة
+    register_user(message.from_user)
     
     # --- تصميم أزرار مبتكر للقائمة الرئيسية ---
     markup = types.InlineKeyboardMarkup(row_width=3)
     
-    # الصف الأول: المنصات المتاحة
     tt_btn = types.InlineKeyboardButton("🎶 TikTok", url="https://tiktok.com")
     ig_btn = types.InlineKeyboardButton("📸 Instagram", url="https://instagram.com")
     yt_btn = types.InlineKeyboardButton("▶️ YouTube", url="https://youtube.com")
-    markup.row(tt_btn, ig_btn, yt_btn) # وضعهم في صف واحد (تصميم "علامات التبويب")
+    markup.row(tt_btn, ig_btn, yt_btn) 
 
-    # الصف الثاني: زر المعلومات والمطور
     settings_btn = types.InlineKeyboardButton("💡 تعليمات الاستخدام", callback_data="show_instructions")
     dev_btn = types.InlineKeyboardButton("👨‍💻 المطور", url="https://t.me/yourusername") 
     markup.row(settings_btn, dev_btn)
@@ -225,7 +234,6 @@ def send_welcome(message):
         parse_mode='HTML', 
         reply_markup=markup
     )
-# ... بقية دوال الواجهة (show_instructions, go_to_start_menu) متبقية كما هي
 
 @bot.callback_query_handler(func=lambda call: call.data == 'show_instructions')
 def show_instructions(call):
@@ -249,6 +257,9 @@ def show_instructions(call):
 @bot.callback_query_handler(func=lambda call: call.data == 'go_to_start_menu')
 def go_to_start_menu(call):
     bot.answer_callback_query(call.id)
+    # تسجيل المستخدم في الذاكرة المؤقتة
+    register_user(call.from_user)
+    
     first_name = call.from_user.first_name if call.from_user else "صديقنا"
     
     markup = types.InlineKeyboardMarkup(row_width=3)
@@ -288,10 +299,8 @@ def process_user_link(message):
     if not is_subscribed(message.chat.id):
         return send_force_subscribe_message(message.chat.id)
     
-    # 1. التحقق من إلغاء العملية
-    if user_url.startswith('/'):
-        bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
-        return 
+    # 1. تسجيل المستخدم وضمان وجوده في الإحصائيات المؤقتة
+    register_user(message.from_user)
 
     # 2. تحديد المنصة بناءً على الرابط
     platform_key = None
@@ -312,8 +321,8 @@ def process_user_link(message):
         # 3. إرسال خيار التحويل لليوتيوب فقط باستخدام "مصفوفة التنسيقات الذكية"
         if platform_key == 'youtube':
             
-            # تحديث الإحصائيات قبل إرسال خيارات التحميل
-            update_user_stats(message.from_user, platform_key)
+            # تحديث الإحصائيات المؤقتة
+            update_download_stats(message.from_user, platform_key)
             
             message_id_key = str(message.message_id) 
             
@@ -340,8 +349,8 @@ def process_user_link(message):
             
         # 4. بدء عملية التحميل المباشر لـ تيك توك وإنستجرام (فيديو فقط)
         
-        # تحديث الإحصائيات قبل بدء التحميل المباشر
-        update_user_stats(message.from_user, platform_key)
+        # تحديث الإحصائيات المؤقتة
+        update_download_stats(message.from_user, platform_key)
         
         loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name} (فيديو)...</strong>", parse_mode="html")
         
