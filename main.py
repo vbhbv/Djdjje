@@ -6,7 +6,7 @@ import re
 import os 
 import sys
 import json 
-import yt_dlp # المكتبة الأساسية للتنزيل
+import yt_dlp
 import tempfile 
 from requests.exceptions import Timeout, RequestException 
 from telebot.apihelper import ApiException 
@@ -15,7 +15,7 @@ from telebot.apihelper import ApiException
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة المتغيرات البيئية
+# قراءة المتغيرات البيئية (BOT_TOKEN و WEBHOOK_URL يجب أن تكونا موجودتين في Railway)
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
 WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
@@ -57,7 +57,7 @@ def send_welcome(message):
     first_name = message.from_user.first_name if message.from_user else "صديقنا"
     markup = types.InlineKeyboardMarkup(row_width=2)
     tt_btn = types.InlineKeyboardButton("تحميل تيك توك 🎶", callback_data="download_tiktok")
-    ig_btn = types.InlineKeyboardButton("تحميل إنستجرام 📸", callback_data="download_instagram")
+    ig_btn = types.inLinEKeyboardButton("تحميل إنستجرام 📸", callback_data="download_instagram")
     dev_btn = types.InlineKeyboardButton("المطور 👨‍💻", url="https://t.me/yourusername") 
     markup.add(tt_btn, ig_btn, dev_btn)
     bot.send_message(
@@ -89,23 +89,27 @@ def handle_download_choice(call):
 def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
     """دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف."""
     
+    # 🧹 استخدام tempfile.TemporaryDirectory يضمن حذف الملفات تلقائياً
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, 'download.mp4')
         
         ydl_opts = {
             'outtmpl': file_path,
+            # صيغة الدمج تتطلب ffmpeg الذي تم تثبيته عبر Procfile
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            # 🛑 تم حذف postprocessors لحل مشكلة 'prefer_muxer' 🛑
+            # 💡 إضافة هذا الخيار للتأكد من استخدام ffmpeg لدمج الملفات (لحظة إنستجرام)
+            'allow_codec_merging': True, 
         }
 
         # بدء التنزيل
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True) 
         
+        # حذف رسالة "جاري التحميل"
         bot.delete_message(chat_id, loading_msg_id)
         
         # الإرسال إلى تيليجرام
@@ -140,7 +144,9 @@ def process_user_link(message):
         
     try:
         # 🚨 Regex المُحسَّن: التحقق من المنصة
+        # قبول tiktok.com, vt.tiktok.com, vm.tiktok.com
         tiktok_regex = r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/'
+        # قبول إنستجرام (p, reel, tv, stories)
         instagram_regex = r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/'
         
         platform_name = None
