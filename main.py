@@ -22,8 +22,13 @@ TIKTOK_API = 'https://dev-broksuper.pantheonsite.io/api/e/mp3.php?url='
 INSTAGRAM_API = 'https://dev-broksuper.pantheonsite.io/api/ink.php?url='
 API_TIMEOUT = 20
 
+# طباعة المتغيرات للتحقق النهائي
+print(f"✅ تم قراءة التوكن: {BOT_TOKEN}")
+print(f"✅ تم قراءة Webhook URL: {WEBHOOK_URL_BASE + WEBHOOK_URL_PATH}")
+
 if not BOT_TOKEN or not WEBHOOK_URL_BASE:
     print("❌ خطأ: يجب تعيين متغيرات BOT_TOKEN و WEBHOOK_URL بشكل كامل!")
+    # يمكن أن يكون الفشل هنا هو سبب عدم ظهور رسالة "جاهز للتشغيل"
 
 # التهيئة
 try:
@@ -39,7 +44,6 @@ except Exception as e:
 @app.route(WEBHOOK_URL_PATH, methods=['POST'])
 def webhook():
     """نقطة النهاية التي يستقبل منها البوت تحديثات تيليجرام."""
-    # استخدام try/except لمنع انهيار الخادم (502)
     if request.headers.get('content-type') == 'application/json':
         try:
             json_string = request.get_data().decode('utf-8')
@@ -47,10 +51,8 @@ def webhook():
             bot.process_new_updates([update])
         
         except Exception as e:
-            # طباعة الخطأ في سجلات Railway لمعرفته، لكن لا ننهار
             print(f"❌ خطأ حرج في معالجة Webhook: {e}")
             
-        # نعود دائماً بـ 200 OK
         return '', 200 
     else:
         return 'Error', 403
@@ -61,14 +63,14 @@ def webhook():
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-    """يرسل رسالة الترحيب وقائمة الخيارات باستخدام HTML."""
     
     first_name = message.from_user.first_name if message.from_user else "صديقنا"
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     tt_btn = types.InlineKeyboardButton("تحميل تيك توك 🎶", callback_data="download_tiktok")
     ig_btn = types.InlineKeyboardButton("تحميل إنستجرام 📸", callback_data="download_instagram")
-    dev_btn = types.InlineKeyboardButton("المطور 👨‍💻", url=f"tg://user?id={DEVELOPER_USER_ID}") 
+    # تم تغيير رابط المطور لتفادي أي مشاكل في التهيئة
+    dev_btn = types.InlineKeyboardButton("المطور 👨‍💻", url="https://t.me/yourusername") 
     
     markup.add(tt_btn, ig_btn, dev_btn)
     
@@ -87,6 +89,7 @@ def send_welcome(message):
 # ===============================================
 #              3. معالجة الـ Callback و الدوال
 # ===============================================
+# هذه الدوال لم يتم تعديلها لأنها تعمل فقط بعد نجاح الرد الأولي.
 
 @bot.callback_query_handler(func=lambda call: call.data in ['download_tiktok', 'download_instagram'])
 def handle_download_choice(call):
@@ -107,7 +110,7 @@ def handle_download_choice(call):
 def process_tiktok_link(message):
     user_url = message.text
     loading_msg = None
-    
+        
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التحميل. اضغط /start للعودة.", parse_mode='HTML')
         send_welcome(message) 
