@@ -15,7 +15,7 @@ from telebot.apihelper import ApiException
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة المتغيرات البيئية
+# قراءة المتغيرات البيئية (BOT_TOKEN و WEBHOOK_URL يجب أن تكونا موجودتين في Railway)
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
 WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
@@ -49,7 +49,7 @@ def webhook():
         return 'Error', 403
 
 # ===============================================
-#              2. معالجة الأوامر الرئيسية
+#              2. معالجة الأوامر الرئيسية (الواجهة)
 # ===============================================
 
 @bot.message_handler(commands=["start"])
@@ -79,29 +79,33 @@ def handle_download_choice(call):
         text=f"""<b>🚀 أرسل رابط فيديو {platform} الآن!</b>""",
         parse_mode='HTML' 
     )
-    # نستخدم نفس الدالة لمعالجة جميع الروابط
+    # نستخدم نفس الدالة الموحدة لمعالجة الرابط التالي
     bot.register_next_step_handler(call.message, process_user_link)
     
 # ===============================================
-#              3. دالة متخصصة: التنزيل والإرسال
+#              3. دالة متخصصة: التنزيل والإرسال (قلب البوت)
 # ===============================================
 
 def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
-    """دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف."""
+    """
+    دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
+    تضمن هذه الدالة إزالة الملفات بعد الإرسال.
+    """
     
-    # 🧹 استخدام tempfile.TemporaryDirectory يضمن حذف الملفات تلقائياً
+    # 🧹 الضمانة التقنية للحذف التلقائي:
+    # عند الخروج من نطاق 'with tempfile.TemporaryDirectory() as tmpdir:'، يتم حذف المجلد وكل ما فيه.
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, 'download.mp4')
         
         ydl_opts = {
             'outtmpl': file_path,
-            # صيغة الدمج التي تتطلب ffmpeg 
+            # صيغة الدمج التي تتطلب ffmpeg (تم التثبيت في Procfile)
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]', 
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            # 🛑 تم حذف 'allow_codec_merging' أيضاً للعودة إلى الأساس الأكثر ثباتاً 
+            'allow_codec_merging': True, # للسماح بدمج الفيديو والصوت في إنستجرام
         }
 
         # بدء التنزيل
@@ -123,6 +127,7 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
                     parse_mode='HTML',
                     supports_streaming=True
                 )
+             # بمجرد الخروج من 'with tempfile.TemporaryDirectory()' يتم حذف الملف
              return True
         else:
              raise Exception("فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل.")
@@ -135,18 +140,17 @@ def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id):
 def process_user_link(message):
     user_url = message.text
     loading_msg = None
+    platform_name = None
     
-    # التحقق من إلغاء العملية
+    # 1. التحقق من إلغاء العملية
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
         return send_welcome(message)
         
     try:
-        # 🚨 Regex المُحسَّن: التحقق من المنصة
+        # 2. تحديد المنصة (Regex المُحسَّن)
         tiktok_regex = r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/'
         instagram_regex = r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/'
-        
-        platform_name = None
         
         if re.match(tiktok_regex, user_url):
             platform_name = "تيك توك"
@@ -156,10 +160,9 @@ def process_user_link(message):
             bot.send_message(message.chat.id, "❌ **الرابط غير صالح!** يرجى إرسال رابط تيك توك أو إنستجرام صحيح ومتاح للعامة.", parse_mode='HTML')
             return send_welcome(message)
             
-        # إرسال رسالة جاري التحميل
+        # 3. بدء عملية التحميل
         loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name}...</strong>", parse_mode="html")
         
-        # استدعاء الدالة المتخصصة
         download_media_yt_dlp(
             message.chat.id,
             user_url,
@@ -168,7 +171,7 @@ def process_user_link(message):
         )
             
     except Exception as e:
-        # طباعة الخطأ بوضوح شديد في سجلات Railway
+        # 4. معالجة الأخطاء وطباعتها بوضوح
         print(f"=====================================================")
         print(f"❌ خطأ حرج في معالجة {platform_name or 'التحميل'}: {e}") 
         print(f"=====================================================")
@@ -177,12 +180,11 @@ def process_user_link(message):
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
         
-        # عرض أول سطر من الخطأ فقط للمستخدم ليكون مفهومًا
         error_msg = str(e).split('\n')[0] 
         bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name or 'الملف'}: <b>{error_msg}</b>", parse_mode='HTML')
         
     finally:
-        # التأكد من العودة للقائمة الرئيسية
+        # 5. إنهاء العملية
         bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 
