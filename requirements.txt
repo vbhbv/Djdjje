@@ -1,4 +1,5 @@
-gunicorn
-Flask
-pyTelegramBotAPI
+pytelegrambotapi
+flask
 requests
+gunicorn
+yt-dlp 
