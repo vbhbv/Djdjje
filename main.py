@@ -6,46 +6,21 @@ import re
 import os 
 import sys
 import json 
-import yt_dlp
-import tempfile 
-from requests.exceptions import Timeout, RequestException 
-from telebot.apihelper import ApiException 
+
+# 🚨 استيراد جميع الدوال من ملف التحميل الخارجي
+from handlers.download import download_media_yt_dlp, load_links, save_links
 
 # ===============================================
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة المتغيرات البيئية (BOT_TOKEN و WEBHOOK_URL يجب أن تكونا موجودتين في Railway)
+# قراءة المتغيرات البيئية
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
 WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
 
 DEVELOPER_USER_ID = "1315011160"
-CHANNEL_USERNAME = "@SuPeRx1"
-
-# 🚨 الحل لمشكلة "انتهت صلاحية التحميل": استخدام ملف JSON للتخزين الدائم
-TEMP_STORAGE_FILE = 'temp_links.json' 
-
-# دالة لقراءة الروابط من الملف
-def load_links():
-    """تحميل جميع الروابط المخزنة من ملف JSON."""
-    if os.path.exists(TEMP_STORAGE_FILE):
-        try:
-            with open(TEMP_STORAGE_FILE, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {}
-    return {}
-
-# دالة لحفظ الروابط في الملف
-def save_links(data):
-    """حفظ الروابط الحالية إلى ملف JSON."""
-    try:
-        with open(TEMP_STORAGE_FILE, 'w') as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"❌ فشل حفظ البيانات في ملف JSON: {e}")
-
+CHANNEL_USERNAME = "@SuPeRx1" # يُفضل وضعه كمتغير بيئي أيضاً
 
 # التهيئة
 try:
@@ -109,62 +84,9 @@ def handle_download_choice(call):
     )
     call.message.platform_key = platform_key 
     bot.register_next_step_handler(call.message, process_user_link)
-
-# ===============================================
-#              3. دالة متخصصة: التنزيل والإرسال
-# ===============================================
-
-def download_media_yt_dlp(chat_id, url, platform_name, loading_msg_id, download_as_mp3=False):
-    """
-    دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
-    تستخدم مسار مؤقت لضمان حذف الملفات بعد الإرسال.
-    """
-    
-    # 🧹 الضمانة التقنية للحذف التلقائي
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_ext = 'mp3' if download_as_mp3 else 'mp4'
-        file_path = os.path.join(tmpdir, f'download.{output_ext}')
-        
-        ydl_opts = {
-            'outtmpl': file_path,
-            'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
-            'cookiefile': None,
-            # استراتيجية التحميل/التحويل (حل مشكلة ffmpeg لغير الـ MP3)
-            'format': 'bestaudio/best' if download_as_mp3 else 'best[ext=mp4]/best',
-        }
-        
-        # إضافة خيارات التحويل لـ MP3 (تتطلب وجود ffmpeg)
-        if download_as_mp3:
-             ydl_opts['postprocessors'] = [{
-                 'key': 'FFmpegExtractAudio',
-                 'preferredcodec': 'mp3',
-                 'preferredquality': '192',
-             }]
-
-        # بدء التنزيل/التحويل
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True) 
-        
-        # حذف رسالة "جاري التحميل"
-        bot.delete_message(chat_id, loading_msg_id)
-        
-        # الإرسال إلى تيليجرام
-        caption_text = f"✅ تم التحميل من {platform_name} بواسطة: {CHANNEL_USERNAME}" 
-        
-        if os.path.exists(file_path):
-             with open(file_path, 'rb') as f:
-                if download_as_mp3:
-                    bot.send_audio(chat_id, f, caption=f'<b>{caption_text}</b>', parse_mode='HTML')
-                else:
-                    bot.send_video(chat_id, f, caption=f'<b>{caption_text}</b>', parse_mode='HTML', supports_streaming=True)
-             return True
-        else:
-             raise Exception(f"فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل كـ {output_ext}.")
     
 # ===============================================
-#              4. الدالة الرئيسية الموحدة للمعالجة
+#              3. الدالة الرئيسية الموحدة للمعالجة
 # ===============================================
 
 @bot.message_handler(func=lambda m: True)
@@ -194,10 +116,9 @@ def process_user_link(message):
     platform_name = platforms[platform_key]
     
     try:
-        # 3. إرسال خيار التحويل لليوتيوب فقط (الحل لمشكلة BUTTON_DATA_INVALID + انتهاء الصلاحية)
+        # 3. إرسال خيار التحويل لليوتيوب فقط 
         if platform_key == 'youtube':
             
-            # 🚨 تخزين الرابط في ملف JSON واستخدام message_id كمفتاح
             message_id_key = str(message.message_id) 
             
             links = load_links()
@@ -215,7 +136,9 @@ def process_user_link(message):
             
         # 4. بدء عملية التحميل المباشر لـ تيك توك وإنستجرام (فيديو فقط)
         loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name} (فيديو)...</strong>", parse_mode="html")
-        download_media_yt_dlp(message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
+        
+        # 🚨 استدعاء الدالة من الملف الخارجي (handlers/download.py)
+        download_media_yt_dlp(bot, message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
             
     except Exception as e:
         # 5. معالجة الأخطاء
@@ -235,7 +158,7 @@ def process_user_link(message):
         bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 # ===============================================
-#              5. معالجة التحميل النهائي (MP3/فيديو)
+#              4. معالجة التحميل النهائي (MP3/فيديو)
 # ===============================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('final_dl_'))
@@ -243,13 +166,13 @@ def handle_final_download(call):
     # final_dl_platform_type_message_id_key
     parts = call.data.split('_')
     platform_key = parts[2]
-    media_type = parts[3] # 'video' or 'audio'
-    message_id_key = parts[4] # مفتاح الرسالة
+    media_type = parts[3] 
+    message_id_key = parts[4] 
     
     # 🚨 استرداد الرابط من ملف JSON وحذفه منه
     links = load_links()
     user_url = links.pop(message_id_key, None) 
-    save_links(links) # حفظ التغيير (حذف الرابط)
+    save_links(links) 
     
     if not user_url:
         bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط أو تم تحميله مسبقاً.")
@@ -276,6 +199,7 @@ def handle_final_download(call):
         
         # 2. استدعاء دالة التنزيل المتخصصة
         download_media_yt_dlp(
+            bot, # 🚨 تمرير البوت للدالة الخارجية
             call.message.chat.id,
             user_url,
             platform_name,
@@ -293,11 +217,10 @@ def handle_final_download(call):
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
         
     finally:
-        # 4. إنهاء العملية
         bot.send_message(call.message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 # ===============================================
-#              6. تهيئة Webhook
+#              5. تهيئة Webhook
 # ===============================================
 
 if __name__ == '__main__':
