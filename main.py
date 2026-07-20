@@ -1,268 +1,322 @@
 import os
-import sys
-import re
 import logging
-import socket
-import threading
 import asyncio
-from flask import Flask
-
+import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import (
-    ApplicationBuilder, 
-    ContextTypes, 
-    CommandHandler, 
-    MessageHandler, 
-    CallbackQueryHandler, 
-    filters
-)
+from telegram.ext import ContextTypes
 
-# استيراد وحدة التنزيل
-from handlers.download import download_media_yt_dlp, load_links, save_links
-
-# استيراد دالات لوحة التحكم وقاعدة البيانات من admin.py
-from admin import (
-    init_db, 
-    register_user, 
-    is_user_banned, 
-    check_force_subscribe, 
-    admin_panel_command, 
-    handle_admin_callbacks, 
-    handle_admin_inputs
-)
-
-# إعداد التسجيل
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
 # ===============================================
-#              0. الإعدادات والتهيئة
+#              0. إعدادات قاعدة البيانات
 # ===============================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.critical("❌ متغير البيئة BOT_TOKEN غير مضبوط!")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-app = Flask(__name__)
-lock_socket = None
-bot_started = False
+pool = None
 
-@app.route('/')
-def home():
-    return "Bot Status: Online | PostgreSQL & Admin Panel Active", 200
+async def get_db_pool():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+    return pool
+
+async def init_db():
+    """إنشاء الجداول المطلوبة في PostgreSQL"""
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        # جدول المستخدمين
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                is_banned BOOLEAN DEFAULT FALSE,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # جدول قنوات الاشتراك الإجباري
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id BIGINT PRIMARY KEY,
+                invite_link TEXT,
+                button_title TEXT
+            )
+        ''')
+        # جدول متتبع حالة الإدارة (للإذاعة والحظر)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS admin_state (
+                admin_id BIGINT PRIMARY KEY,
+                state TEXT
+            )
+        ''')
+    logger.info("✅ تم الاتصال بقاعدة البيانات PostgreSQL وتهيئة الجداول بنجاح.")
 
 # ===============================================
-#              1. الوساطة والتحقق (Middleware)
+#             1. دالات المستخدمين والحظر
 # ===============================================
 
-async def pre_process_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    دالة مركزية تُنفذ عند كل تفاعل:
-    - تسجيل/تحديث المستخدم في PostgreSQL.
-    - التحقق من الحظر.
-    - التحقق من الاشتراك الإجباري.
-    """
-    if not update.effective_user:
+async def register_user(user_id: int, username: str):
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO users (user_id, username)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
+        ''', user_id, username)
+
+async def is_user_banned(user_id: int) -> bool:
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow('SELECT is_banned FROM users WHERE user_id = $1', user_id)
+        return row['is_banned'] if row else False
+
+async def set_user_ban(user_id: int, ban_status: bool):
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        await conn.execute('UPDATE users SET is_banned = $1 WHERE user_id = $2', ban_status, user_id)
+
+# ===============================================
+#          2. دالات الاشتراك الإجباري
+# ===============================================
+
+async def get_channels():
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        return await conn.fetch('SELECT channel_id, invite_link, button_title FROM channels')
+
+async def add_channel(channel_id: int, invite_link: str, button_title: str):
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO channels (channel_id, invite_link, button_title)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (channel_id) DO UPDATE SET invite_link = $2, button_title = $3
+        ''', channel_id, invite_link, button_title)
+
+async def delete_channel(channel_id: int):
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        await conn.execute('DELETE FROM channels WHERE channel_id = $1', channel_id)
+
+async def check_force_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """فحص اشتراك المستخدم في القنوات الإجبارية"""
+    channels = await get_channels()
+    if not channels:
         return True
 
-    user = update.effective_user
-    username = user.username or f"User_{user.id}"
+    user_id = update.effective_user.id
+    unsubscribed_channels = []
 
-    # 1. تسجيل المستخدم في القاعدة
-    await register_user(user.id, username)
+    for ch in channels:
+        try:
+            member = await context.bot.get_chat_member(chat_id=ch['channel_id'], user_id=user_id)
+            if member.status in ['left', 'kicked']:
+                unsubscribed_channels.append(ch)
+        except Exception as e:
+            logger.warning(f"تعذر الفحص في القناة {ch['channel_id']}: {e}")
 
-    # 2. فحص الحظر
-    if await is_user_banned(user.id):
+    if unsubscribed_channels:
+        keyboard = []
+        for ch in unsubscribed_channels:
+            keyboard.append([InlineKeyboardButton(ch['button_title'], url=ch['invite_link'])])
+        keyboard.append([InlineKeyboardButton("تحقق من الاشتراك 🔄", callback_data="check_subscription")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        msg_text = "⚠️ **عذراً عزيزي، يجب عليك الاشتراك في القنوات التالية لاستخدام البوت:**"
+
         if update.message:
-            await update.message.reply_text("🚫 **عذراً، حسابك محظور نهائياً من استخدام البوت.**", parse_mode='Markdown')
-        return False
-
-    # 3. فحص الاشتراك الإجباري
-    is_subscribed = await check_force_subscribe(update, context)
-    if not is_subscribed:
+            await update.message.reply_text(msg_text, reply_markup=reply_markup, parse_mode='Markdown')
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(msg_text, reply_markup=reply_markup, parse_mode='Markdown')
         return False
 
     return True
 
 # ===============================================
-#              2. الأوامر والمعالجات
+#             3. لوحة التحكم للإدارة
 # ===============================================
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر /start للترحيب"""
-    if not await pre_process_update(update, context):
+async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فتح لوحة تحكم الإدارة"""
+    if update.effective_user.id != ADMIN_ID:
         return
 
-    first_name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"<b>مرحباً بك {first_name}!</b> 👋\n\n"
-        f"أنا بوت التحميل السريع من (تيك توك، إنستغرام، يوتيوب).\n"
-        f"أرسل رابط الميديا مباشرة وسأعطيك خيارات التحميل صوت أو فيديو! 🚀",
-        parse_mode=constants.ParseMode.HTML
-    )
+    keyboard = [
+        [InlineKeyboardButton("📊 الإحصائيات", callback_data="admin_stats"), InlineKeyboardButton("📢 إذاعة للمستخدمين", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("➕ إضافة قناة اشتراك", callback_data="admin_add_channel"), InlineKeyboardButton("❌ حذف قناة اشتراك", callback_data="admin_del_channel")],
+        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="admin_ban_user"), InlineKeyboardButton("✅ إلغاء حظر مستخدم", callback_data="admin_unban_user")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("⚙️ **أهلاً بك في لوحة تحكم الأدمن:**", reply_markup=reply_markup, parse_mode='Markdown')
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة جميع الرسائل النصية والروابط"""
-    if not await pre_process_update(update, context):
-        return
+async def set_admin_state(admin_id: int, state: str):
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO admin_state (admin_id, state) VALUES ($1, $2)
+            ON CONFLICT (admin_id) DO UPDATE SET state = $2
+        ''', admin_id, state)
 
-    # معالجة المدخلات النصية الخاصة بالإدارة أولاً (إذاعة، حظر، إلخ)
-    is_admin_input = await handle_admin_inputs(update, context)
-    if is_admin_input:
-        return
+async def get_admin_state(admin_id: int) -> str:
+    p = await get_db_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow('SELECT state FROM admin_state WHERE admin_id = $1', admin_id)
+        return row['state'] if row else None
 
-    text = update.message.text.strip() if update.message.text else ""
-    if text.startswith('/'):
-        return
+# ===============================================
+#        4. معالجة التفاعلات ورسالة التفعيل
+# ===============================================
 
-    platform_key, platform_name = None, None
-    
-    # فحص الرابط عبر Regex
-    if re.search(r'(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)', text, re.IGNORECASE):
-        platform_key, platform_name = 'tiktok', 'تيك توك'
-    elif re.search(r'instagram\.com/(?:p|reel|tv|stories)', text, re.IGNORECASE):
-        platform_key, platform_name = 'instagram', 'إنستجرام'
-    elif re.search(r'(?:youtube\.com|youtu\.be)', text, re.IGNORECASE):
-        platform_key, platform_name = 'youtube', 'يوتيوب'
-    
-    if platform_key:
-        msg_id_key = str(update.message.message_id) 
-        links = load_links()
-        links[msg_id_key] = text
-        save_links(links) 
-        
-        keyboard = [
-            [InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{msg_id_key}")],
-            [InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{msg_id_key}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            f"⚙️ <b>تم رصد رابط {platform_name}.</b>\nاختر الصيغة المطلوبة للتحميل:", 
-            reply_markup=reply_markup, 
-            parse_mode=constants.ParseMode.HTML
-        )
-    else:
-        await update.message.reply_text(
-            "❌ <b>عذراً، هذا الرابط غير مدعوم!</b>\nأرسل رابطاً صحيحاً من TikTok أو Instagram أو YouTube.", 
-            parse_mode=constants.ParseMode.HTML
-        )
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة الأزرار التفاعلية (Inline Buttons)"""
+async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    user_id = query.from_user.id
 
-    # 1. أزرار لوحة تحكم الإدارة والتحقق من الاشتراك
-    if data.startswith(('admin_', 'check_subscription')):
-        await handle_admin_callbacks(update, context)
-        return
-
-    # 2. أزرار التنزيل للمستخدمين
-    if not await pre_process_update(update, context):
+    # 🎯 هنا تم التعديل لتصبح نفس رسالة /start تماماً
+    if data == "check_subscription":
         await query.answer()
-        return
-
-    if data.startswith('final_dl_'):
-        await query.answer()
-        parts = data.split('_')
-        platform_key, media_type, msg_id_key = parts[2], parts[3], parts[4]
-        
-        links = load_links()
-        user_url = links.pop(msg_id_key, None) 
-        save_links(links) 
-        
-        if not user_url:
-            await query.edit_message_text("❌ **انتهت صلاحية هذا الرابط. أرسله مجدداً.**", parse_mode='Markdown')
-            return
-
-        platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
-        platform_name = platforms.get(platform_key, 'المنصة')
-        download_as_mp3 = (media_type == 'audio')
-        type_str = "صوت MP3 🎧" if download_as_mp3 else "فيديو 🎥"
-        
-        loading_msg = await query.edit_message_text(
-            text=f"⚡ <b>جارٍ التحميل والمعالجة من {platform_name} ({type_str})...</b>\n⏳ يرجى الانتظار...", 
-            parse_mode=constants.ParseMode.HTML
-        )
-        
-        try:
-            await download_media_yt_dlp(
-                context.bot, 
-                query.message.chat.id, 
-                user_url, 
-                platform_name, 
-                loading_msg.message_id, 
-                download_as_mp3
-            )
-        except Exception as e:
-            logger.error(f"خطأ أثناء التحميل: {e}")
-            err_short = str(e).split('\n')[0]
+        is_sub = await check_force_subscribe(update, context)
+        if is_sub:
+            await query.message.delete()
+            first_name = query.from_user.first_name
+            
+            # نفس النص الخاص بأمر /start
             await context.bot.send_message(
-                query.message.chat.id, 
-                f"❌ حدث خطأ أثناء التحميل: <b>{err_short}</b>", 
+                chat_id=query.message.chat_id,
+                text=f"<b>مرحباً بك {first_name}!</b> 👋\n\n"
+                     f"أنا بوت التحميل السريع من (تيك توك، إنستغرام، يوتيوب).\n"
+                     f"أرسل رابط الميديا مباشرة وسأعطيك خيارات التحميل صوت أو فيديو! 🚀",
                 parse_mode=constants.ParseMode.HTML
             )
-
-# ===============================================
-#   3. تشغيل البوت وإدارة السوكت (Single Instance)
-# ===============================================
-
-def run_single_application():
-    """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409 وتجاوز أخطاء الـ Threading"""
-    global lock_socket
-    
-    # حماية من فتح أكثر من Worker عبر Socket Lock
-    try:
-        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        lock_socket.bind(('127.0.0.1', 47201))
-    except socket.error:
-        logger.info("ℹ️ يوجد Worker شغال حالياً، تم إيقاف المجرى الحالي لتفادي تعارض 409 Conflict.")
         return
 
-    # إنشاء Async Loop جديد للثرد
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    # إنشاء الجداول في PostgreSQL
-    loop.run_until_complete(init_db())
-
-    if not BOT_TOKEN:
-        logger.critical("❌ لا يمكن تشغيل البوت بدون BOT_TOKEN")
+    if user_id != ADMIN_ID:
+        await query.answer("عذراً، هذا الأمر مخصص للإدارة فقط.", show_alert=True)
         return
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    if data == "admin_stats":
+        p = await get_db_pool()
+        async with p.acquire() as conn:
+            total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+            banned_users = await conn.fetchval('SELECT COUNT(*) FROM users WHERE is_banned = TRUE')
+            channels_count = await conn.fetchval('SELECT COUNT(*) FROM channels')
+        
+        await query.edit_message_text(
+            f"📊 **إحصائيات البوت:**\n\n"
+            f"👤 عدد المستخدمين الكلي: `{total_users}`\n"
+            f"🚫 المحظورين: `{banned_users}`\n"
+            f"📢 قنوات الاشتراك الإجباري: `{channels_count}`",
+            parse_mode='Markdown'
+        )
 
-    # تسجيل الأوامر والمعالجات
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("admin", admin_panel_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    application.add_handler(CallbackQueryHandler(callback_handler))
+    elif data == "admin_broadcast":
+        await set_admin_state(user_id, "WAITING_BROADCAST")
+        await query.edit_message_text("📢 **أرسل الآن الرسالة (نص أو ميديا) التي تريد إذاعتها لجميع المستخدمين:**", parse_mode='Markdown')
 
-    logger.info("✅ تم قفل السوكت بنجاح. بدء استقبال التحديثات...")
-    
-    # تعطيل stop_signals لمنع استدعاء set_wakeup_fd خارج Main Thread
-    application.run_polling(
-        drop_pending_updates=True, 
-        stop_signals=None, 
-        close_loop=False
-    )
+    elif data == "admin_add_channel":
+        await set_admin_state(user_id, "WAITING_ADD_CHANNEL")
+        await query.edit_message_text(
+            "➕ **لإضافة قناة اشتراك إجباري جديدة:**\n\n"
+            "أرسل البيانات مفصولة بفاصلة كالتالي:\n"
+            "`ID_القناة, رابط_الدعوة, اسم_الزر`\n\n"
+            "💡 مثال:\n`-1001617871951, https://t.me/iiollr, اشترك في القناة 📢`",
+            parse_mode='Markdown'
+        )
 
-def start_bot_in_background():
-    """بدء تشغيل البوت في ثرد منفصل لمنع حظر Gunicorn"""
-    global bot_started
-    if not bot_started:
-        bot_started = True
-        bot_thread = threading.Thread(target=run_single_application, daemon=True)
-        bot_thread.start()
+    elif data == "admin_del_channel":
+        channels = await get_channels()
+        if not channels:
+            await query.edit_message_text("❌ لا توجد قنوات اشتراك إجباري حالياً.")
+            return
 
-# تشغيل البوت تلقائياً عند استدعاء الملف عبر Gunicorn
-start_bot_in_background()
+        keyboard = []
+        for ch in channels:
+            keyboard.append([InlineKeyboardButton(f"❌ حذف {ch['button_title']}", callback_data=f"del_ch_{ch['channel_id']}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("اختر القناة التي تريد حذفها:", reply_markup=reply_markup)
 
-if __name__ == '__main__':
-    # للتشغيل المحلي المباشر
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, use_reloader=False)
+    elif data.startswith("del_ch_"):
+        ch_id = int(data.split("_")[2])
+        await delete_channel(ch_id)
+        await query.edit_message_text("✅ تم حذف القناة بنجاح.")
+
+    elif data == "admin_ban_user":
+        await set_admin_state(user_id, "WAITING_BAN_ID")
+        await query.edit_message_text("🚫 أرسل **آيدي (ID) المستخدم** الذي تريد حظره:", parse_mode='Markdown')
+
+    elif data == "admin_unban_user":
+        await set_admin_state(user_id, "WAITING_UNBAN_ID")
+        await query.edit_message_text("✅ أرسل **آيدي (ID) المستخدم** الذي تريد إلغاء حظره:", parse_mode='Markdown')
+
+# ===============================================
+#             5. معالجة مدخلات الإدارة
+# ===============================================
+
+async def handle_admin_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return False
+
+    state = await get_admin_state(user_id)
+    if not state:
+        return False
+
+    text = update.message.text.strip() if update.message.text else ""
+
+    if state == "WAITING_BROADCAST":
+        await set_admin_state(user_id, "")
+        await update.message.reply_text("⏳ جارٍ بدء الإذاعة...")
+        
+        p = await get_db_pool()
+        async with p.acquire() as conn:
+            users = await conn.fetch('SELECT user_id FROM users WHERE is_banned = FALSE')
+        
+        success, failed = 0, 0
+        for u in users:
+            try:
+                await update.message.copy(chat_id=u['user_id'])
+                success += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                failed += 1
+
+        await update.message.reply_text(f"✅ **تمت الإذاعة بنجاح!**\n\n🎯 وصلت: `{success}`\n❌ فشلت: `{failed}`", parse_mode='Markdown')
+        return True
+
+    elif state == "WAITING_ADD_CHANNEL":
+        await set_admin_state(user_id, "")
+        try:
+            parts = [p.strip() for p in text.split(',')]
+            ch_id = int(parts[0])
+            link = parts[1]
+            title = parts[2]
+            
+            await add_channel(ch_id, link, title)
+            await update.message.reply_text(f"✅ **تمت إضافة القناة بنجاح!**\n\n📌 **الاسم:** {title}\n🆔 **ID:** `{ch_id}`", parse_mode='Markdown')
+        except Exception as e:
+            await update.message.reply_text(f"❌ **خطأ في التنسيق!** تأكد من إرسال البيانات بالصيغة الصحيحة:\n`ID_القناة, رابط_الدعوة, اسم_الزر`\n\nالخطأ: `{e}`", parse_mode='Markdown')
+        return True
+
+    elif state == "WAITING_BAN_ID":
+        await set_admin_state(user_id, "")
+        try:
+            target_id = int(text)
+            await set_user_ban(target_id, True)
+            await update.message.reply_text(f"🚫 تم حظر المستخدم `{target_id}` بنجاح.", parse_mode='Markdown')
+        except ValueError:
+            await update.message.reply_text("❌ الآيدي غير صحيح!")
+        return True
+
+    elif state == "WAITING_UNBAN_ID":
+        await set_admin_state(user_id, "")
+        try:
+            target_id = int(text)
+            await set_user_ban(target_id, False)
+            await update.message.reply_text(f"✅ تم إلغاء حظر المستخدم `{target_id}` بنجاح.", parse_mode='Markdown')
+        except ValueError:
+            await update.message.reply_text("❌ الآيدي غير صحيح!")
+        return True
+
+    return False
