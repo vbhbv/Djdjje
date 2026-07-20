@@ -44,7 +44,7 @@ def send_welcome(message):
 
 🚀 <b>طريقة الاستخدام:</b>
 أرسل رابط الفيديو مباشرة في الشات (تيك توك، إنستجرام، أو يوتيوب).
-سأقوم بالتعرف على المنصة وتحميل مقطعك تلقائياً وبسرعة!""",
+سأقوم بالتعرف على المنصة ثم تخييرك بين تحميله كـ <b>فيديو 🎥</b> أو تحويله إلى <b>صوت MP3 🎧</b>!""",
         parse_mode='HTML'
     )
 
@@ -55,7 +55,6 @@ def send_welcome(message):
 @bot.message_handler(func=lambda m: True)
 def auto_detect_and_process_link(message):
     user_url = message.text.strip() if message.text else ""
-    loading_msg = None
     
     if user_url.startswith('/'):
         return
@@ -79,39 +78,28 @@ def auto_detect_and_process_link(message):
         return
 
     try:
-        if platform_key == 'youtube':
-            message_id_key = str(message.message_id) 
-            links = load_links()
-            links[message_id_key] = user_url
-            save_links(links) 
-            
-            markup = types.InlineKeyboardMarkup()
-            vid_btn = types.InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{message_id_key}")
-            aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{message_id_key}")
-            markup.add(vid_btn, aud_btn)
-            
-            bot.send_message(
-                message.chat.id, 
-                f"⚙️ <b>تم رصد رابط {platform_name}.</b>\nاختر الصيغة التي تفضلها لبدء التحميل:", 
-                reply_markup=markup, 
-                parse_mode='HTML'
-            )
-            return
-            
-        loading_msg = bot.send_message(
+        # 🎯 عرض خيارات الصيغة (فيديو / صوت) لجميع المنصات المدعومة
+        message_id_key = str(message.message_id) 
+        links = load_links()
+        links[message_id_key] = user_url
+        save_links(links) 
+        
+        markup = types.InlineKeyboardMarkup()
+        vid_btn = types.InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{message_id_key}")
+        aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{message_id_key}")
+        markup.add(vid_btn, aud_btn)
+        
+        bot.send_message(
             message.chat.id, 
-            f"⚡ <b>تم التعرف تلقائياً على رابط {platform_name}!</b>\n⏳ جارٍ المعالجة وسحب الفيديو الآن...", 
-            parse_mode="HTML"
+            f"⚙️ <b>تم رصد رابط {platform_name}.</b>\nاختر الصيغة التي تفضلها لبدء التحميل:", 
+            reply_markup=markup, 
+            parse_mode='HTML'
         )
-        download_media_yt_dlp(bot, message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
             
     except Exception as e:
         print(f"❌ خطأ في المعالجة التلقائية لـ {platform_name}: {e}")
-        if loading_msg:
-             try: bot.delete_message(message.chat.id, loading_msg.message_id) 
-             except: pass 
         error_msg = str(e).split('\n')[0] 
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء معالجة رابط {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
 #              3. معالجة التحميل النهائي (MP3/فيديو)
@@ -134,11 +122,18 @@ def handle_final_download(call):
         return
 
     platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
-    platform_name = platforms[platform_key]
+    platform_name = platforms.get(platform_key, 'المنصة')
     download_as_mp3 = (media_type == 'audio')
     
+    type_str = "صوت MP3 🎧" if download_as_mp3 else "فيديو 🎥"
+    
     try:
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"<b>⏳ جارٍ التحميل/التحويل من {platform_name} ({media_type.upper()})...</b>", parse_mode='HTML')
+        bot.edit_message_text(
+            chat_id=call.message.chat.id, 
+            message_id=call.message.message_id, 
+            text=f"⚡ <b>جارٍ التحميل والـ معالجة من {platform_name} ({type_str})...</b>\n⏳ يرجى الانتظار قليلاً.", 
+            parse_mode='HTML'
+        )
         download_media_yt_dlp(bot, call.message.chat.id, user_url, platform_name, call.message.message_id, download_as_mp3=download_as_mp3)
     except Exception as e:
         print(f"❌ خطأ حرج في التحميل النهائي {platform_name}: {e}")
