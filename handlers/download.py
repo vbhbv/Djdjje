@@ -1,4 +1,3 @@
-
 import os
 import tempfile
 import yt_dlp
@@ -69,7 +68,7 @@ def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, down
         bot.delete_message(chat_id, loading_msg_id)
         
         # الإرسال إلى تيليجرام
-        CHANNEL_USERNAME = "@SuPeRx1" # يجب تعريف هذا المتغير في مكان ما أو تمريره
+        CHANNEL_USERNAME = "@SuPeRx1" 
         caption_text = f"✅ تم التحميل من {platform_name} بواسطة: {CHANNEL_USERNAME}" 
         
         if os.path.exists(file_path):
@@ -81,4 +80,3 @@ def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, down
              return True
         else:
              raise Exception(f"فشل yt-dlp في حفظ أو إيجاد الملف بعد التنزيل كـ {output_ext}.")
-
