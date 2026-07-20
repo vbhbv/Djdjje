@@ -17,8 +17,10 @@ from telegram.ext import (
     filters
 )
 
-# استيراد الوحدات الفرعية (تأكد من خلوها من أخطاء الـ Import)
+# استيراد وحدة التنزيل
 from handlers.download import download_media_yt_dlp, load_links, save_links
+
+# استيراد دالات لوحة التحكم وقاعدة البيانات من admin.py
 from admin import (
     init_db, 
     register_user, 
@@ -29,6 +31,7 @@ from admin import (
     handle_admin_inputs
 )
 
+# إعداد التسجيل (Logging)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO
@@ -36,57 +39,79 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===============================================
-#     تعريف كائن Flask ليعثر عليه Gunicorn
+#     0. تهيئة تطبيق Flask (Gunicorn يبحث عن app)
 # ===============================================
-app = Flask(__name__)
+
+app = Flask(__name__)  # <--- هذا هو الكائن المطلوب لـ Gunicorn
 lock_socket = None
 bot_started = False
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.critical("❌ متغير البيئة BOT_TOKEN غير مضبوط!")
 
 @app.route('/')
 def home():
-    return "Bot status: Online", 200
+    return "Bot Status: Online | PostgreSQL & Admin Panel Active", 200
 
 # ===============================================
-#              معالجات الأوامر والرسائل
+#              1. الوساطة والتحقق (Middleware)
 # ===============================================
 
 async def pre_process_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    دالة مركزية تُنفذ عند كل تفاعل:
+    - تسجيل/تحديث المستخدم في PostgreSQL.
+    - التحقق من الحظر.
+    - التحقق من الاشتراك الإجباري.
+    """
     if not update.effective_user:
         return True
 
     user = update.effective_user
     username = user.username or f"User_{user.id}"
 
+    # 1. تسجيل المستخدم في القاعدة
     await register_user(user.id, username)
 
+    # 2. فحص الحظر
     if await is_user_banned(user.id):
         if update.message:
-            await update.message.reply_text("🚫 حسابك محظور من استخدام البوت.")
+            await update.message.reply_text("🚫 **عذراً، حسابك محظور نهائياً من استخدام البوت.**", parse_mode='Markdown')
         return False
 
+    # 3. فحص الاشتراك الإجباري
     is_subscribed = await check_force_subscribe(update, context)
     if not is_subscribed:
         return False
 
     return True
 
+# ===============================================
+#              2. الأوامر والمعالجات
+# ===============================================
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /start للترحيب"""
     if not await pre_process_update(update, context):
         return
 
     first_name = update.effective_user.first_name
     await update.message.reply_text(
-        f"مرحباً بك {first_name}! 👋\nأرسل رابط الميديا للتحميل المباشر.",
+        f"<b>مرحباً بك {first_name}!</b> 👋\n\n"
+        f"أنا بوت التحميل السريع من (تيك توك، إنستغرام، يوتيوب).\n"
+        f"أرسل رابط الميديا مباشرة وسأحمله لك صوت أو فيديو! 🚀",
         parse_mode=constants.ParseMode.HTML
     )
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة جميع الرسائل النصية والروابط"""
     if not await pre_process_update(update, context):
         return
 
-    if await handle_admin_inputs(update, context):
+    # معالجة المدخلات النصية الخاصة بالإدارة أولاً (إذاعة، حظر، إلخ)
+    is_admin_input = await handle_admin_inputs(update, context)
+    if is_admin_input:
         return
 
     text = update.message.text.strip() if update.message.text else ""
@@ -95,6 +120,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     platform_key, platform_name = None, None
     
+    # فحص الرابط عبر Regex
     if re.search(r'(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)', text, re.IGNORECASE):
         platform_key, platform_name = 'tiktok', 'تيك توك'
     elif re.search(r'instagram\.com/(?:p|reel|tv|stories)', text, re.IGNORECASE):
@@ -115,21 +141,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            f"⚙️ تم رصد رابط {platform_name}. اختر الصيغة:", 
+            f"⚙️ <b>تم رصد رابط {platform_name}.</b>\nاختر الصيغة المطلوبة للتحميل:", 
             reply_markup=reply_markup, 
             parse_mode=constants.ParseMode.HTML
         )
     else:
-        await update.message.reply_text("❌ رابط غير مدعوم.")
+        await update.message.reply_text(
+            "❌ <b>عذراً، هذا الرابط غير مدعوم!</b>\nأرسل رابطاً صحيحاً من TikTok أو Instagram أو YouTube.", 
+            parse_mode=constants.ParseMode.HTML
+        )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة الأزرار التفاعلية (Inline Buttons)"""
     query = update.callback_query
     data = query.data
 
+    # 1. أزرار لوحة تحكم الإدارة والتحقق من الاشتراك
     if data.startswith(('admin_', 'check_subscription')):
         await handle_admin_callbacks(update, context)
         return
 
+    # 2. أزرار التنزيل للمستخدمين
     if not await pre_process_update(update, context):
         await query.answer()
         return
@@ -144,15 +176,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_links(links) 
         
         if not user_url:
-            await query.edit_message_text("❌ انتهت صلاحية الرابط.")
+            await query.edit_message_text("❌ **انتهت صلاحية هذا الرابط. أرسله مجدداً.**", parse_mode='Markdown')
             return
 
         platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
         platform_name = platforms.get(platform_key, 'المنصة')
         download_as_mp3 = (media_type == 'audio')
+        type_str = "صوت MP3 🎧" if download_as_mp3 else "فيديو 🎥"
         
         loading_msg = await query.edit_message_text(
-            text=f"⚡ جارٍ التحميل من {platform_name}...", 
+            text=f"⚡ <b>جارٍ التحميل والمعالجة من {platform_name} ({type_str})...</b>\n⏳ يرجى الانتظار...", 
             parse_mode=constants.ParseMode.HTML
         )
         
@@ -167,41 +200,51 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"خطأ أثناء التحميل: {e}")
+            err_short = str(e).split('\n')[0]
             await context.bot.send_message(
                 query.message.chat.id, 
-                f"❌ حدث خطأ أثناء التحميل: {str(e).split('\n')[0]}"
+                f"❌ حدث خطأ أثناء التحميل: <b>{err_short}</b>", 
+                parse_mode=constants.ParseMode.HTML
             )
 
 # ===============================================
-#          تشغيل البوت في الخلفية (Background)
+#   3. تشغيل البوت وإدارة السوكت (Single Instance)
 # ===============================================
 
 def run_single_application():
+    """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409 وتجاوز أخطاء الـ Threading"""
     global lock_socket
     
-    # تفادي تكرار تشغيل البوت عند توزع الـ Workers
+    # حماية من فتح أكثر من Worker عبر Socket Lock
     try:
         lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         lock_socket.bind(('127.0.0.1', 47201))
     except socket.error:
-        logger.info("ℹ️ Worker آخر يعمل بالفعل.")
+        logger.info("ℹ️ يوجد Worker شغال حالياً، تم إيقاف المجرى الحالي لتفادي تعارض 409 Conflict.")
         return
 
+    # إنشاء Async Loop جديد للثرد
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
+    # إنشاء الجداول في PostgreSQL
     loop.run_until_complete(init_db())
 
     if not BOT_TOKEN:
-        logger.critical("❌ BOT_TOKEN غير موجود")
+        logger.critical("❌ لا يمكن تشغيل البوت بدون BOT_TOKEN")
         return
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # تسجيل الأوامر والمعالجات
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("admin", admin_panel_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
+    logger.info("✅ تم قفل السوكت بنجاح. بدء استقبال التحديثات...")
+    
+    # تعطيل stop_signals لمنع استدعاء set_wakeup_fd خارج Main Thread
     application.run_polling(
         drop_pending_updates=True, 
         stop_signals=None, 
@@ -209,15 +252,17 @@ def run_single_application():
     )
 
 def start_bot_in_background():
+    """بدء تشغيل البوت في ثرد منفصل لمنع حظر Gunicorn"""
     global bot_started
     if not bot_started:
         bot_started = True
         bot_thread = threading.Thread(target=run_single_application, daemon=True)
         bot_thread.start()
 
-# بدء التثبيت عند استدعاء Gunicorn للملف
+# تشغيل البوت تلقائياً عند استدعاء الملف بواسطة Gunicorn
 start_bot_in_background()
 
 if __name__ == '__main__':
+    # للتشغيل المحلي المباشر
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
