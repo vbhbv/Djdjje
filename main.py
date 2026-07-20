@@ -23,7 +23,6 @@ DEVELOPER_USER_ID = "1315011160"
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# متغير عام للحفاظ على مرجع الـ Socket حتى لا يُغلق تلقائياً بواسطة الـ Garbage Collector
 lock_socket = None
 
 @app.route('/')
@@ -80,7 +79,6 @@ def auto_detect_and_process_link(message):
         return
 
     try:
-        # 🎬 معاملة خاصة ليوتيوب لعرض خيارات الصيغة (فيديو / صوت)
         if platform_key == 'youtube':
             message_id_key = str(message.message_id) 
             links = load_links()
@@ -100,7 +98,6 @@ def auto_detect_and_process_link(message):
             )
             return
             
-        # 🚀 التحميل المباشر لتيك توك وإنستجرام
         loading_msg = bot.send_message(
             message.chat.id, 
             f"⚡ <b>تم التعرف تلقائياً على رابط {platform_name}!</b>\n⏳ جارٍ المعالجة وسحب الفيديو الآن...", 
@@ -153,12 +150,14 @@ def handle_final_download(call):
 # ===============================================
 
 def start_polling():
-    print("🧹 تنظيف الـ Webhook المتبقي وإعادة تعيين الاتصال...")
+    print("🧹 إلغاء جميع الاتصالات السابقة وحذف الـ Webhook...")
     try:
-        bot.remove_webhook()
+        bot.close()
+        time.sleep(1)
+        bot.remove_webhook(drop_pending_updates=True)
         time.sleep(2)
     except Exception as e:
-        print(f"⚠️ تنبيه أثناء الحذف: {e}")
+        print(f"⚠️ تنبيه أثناء التهيئة: {e}")
 
     print("🚀 انطلاق البوت بنجاح عبر نظام الـ Auto-Detect Polling النقي...")
     bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
@@ -166,7 +165,6 @@ def start_polling():
 def run_single_bot_instance():
     global lock_socket
     try:
-        # حجز بورت محلي صامت يمنع تشغيل أكثر من Worker للبوت
         lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         lock_socket.bind(('127.0.0.1', 47200))
         
@@ -177,7 +175,6 @@ def run_single_bot_instance():
     except socket.error:
         print("ℹ️ Worker إضافي تم تجنبه تلقائياً لمنع تعارض (409 Conflict).")
 
-# تشغيل الفحص والحماية فوراً
 run_single_bot_instance()
 
 if __name__ == '__main__':
