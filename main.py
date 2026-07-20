@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot status: Active & Listening via Gunicorn Dynamic Polling.", 200
+    return "Bot status: Active & Running Pure Auto-Detect Mode.", 200
 
 # ===============================================
 #              1. معالجة الأوامر الرئيسية (الواجهة)
@@ -33,65 +33,53 @@ def home():
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     first_name = message.from_user.first_name if message.from_user else "صديقنا"
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    tt_btn = types.InlineKeyboardButton("تحميل تيك توك 🎶", callback_data="download_tiktok")
-    ig_btn = types.InlineKeyboardButton("تحميل إنستجرام 📸", callback_data="download_instagram")
-    yt_btn = types.InlineKeyboardButton("تحميل يوتيوب ▶️", callback_data="download_youtube")
-    dev_btn = types.InlineKeyboardButton("المطور 👨‍💻", url="https://t.me/yourusername") 
-    markup.add(tt_btn, ig_btn, yt_btn, dev_btn)
+    
+    # واجهة مستخدم نقية وسريعة بدون أي أزرار مشتتة
     bot.send_message(
         message.chat.id,
         f"""<b>مرحباً بك {first_name}!</b> 👋
-أنا بوت التحميل الشامل. اختر المنصة التي تريد التحميل منها:
-* اختر من القائمة أدناه وأرسل <b>الرابط فوراً</b>.""",
-        parse_mode='HTML', 
-        reply_markup=markup
+أنا بوت التحميل الشامل والسريع.
+
+🚀 <b>طريقة الاستخدام:</b>
+كل ما عليك فعله هو إرسال رابط الفيديو مباشرة في الشات (تيك توك، إنستجرام، أو يوتيوب).
+سأقوم بالتعرف على المنصة وتحميل مقطعك تلقائياً وبسرعة!""",
+        parse_mode='HTML'
     )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('download_'))
-def handle_download_choice(call):
-    platform_key = call.data.split('_')[1]
-    platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
-    platform = platforms.get(platform_key, 'غير معروف')
-    
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=f"<b>🚀 أرسل رابط فيديو {platform} الآن!</b>",
-        parse_mode='HTML' 
-    )
-    call.message.platform_key = platform_key 
-    bot.register_next_step_handler(call.message, process_user_link)
-    
 # ===============================================
-#              2. الدالة الرئيسية الموحدة للمعالجة
+#        2. الدالة الذكية: التعرف التلقائي على الروابط
 # ===============================================
 
 @bot.message_handler(func=lambda m: True)
-def process_user_link(message):
-    user_url = message.text
+def auto_detect_and_process_link(message):
+    user_url = message.text.strip() if message.text else ""
     loading_msg = None
-    platform_key = getattr(message, 'platform_key', None) 
     
+    # تجاهل الأوامر الاعتيادية كأمر التشغيل
     if user_url.startswith('/'):
-        bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
-        return send_welcome(message)
+        return
 
-    if not platform_key:
-        if re.match(r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/', user_url):
-            platform_key = 'tiktok'
-        elif re.match(r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/', user_url):
-            platform_key = 'instagram'
-        elif re.match(r'https?://(?:www\.)?(?:youtube\.com|youtu\.be)/', user_url):
-            platform_key = 'youtube'
-        else:
-            bot.send_message(message.chat.id, "❌ **الرابط غير صالح!** يرجى إرسال رابط صحيح.", parse_mode='HTML')
-            return
+    # 🔍 اقتناص نوع المنصة تلقائياً عبر تعابير ريجكس (Regex)
+    if re.search(r'(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)', user_url, re.IGNORECASE):
+        platform_key = 'tiktok'
+        platform_name = 'تيك توك'
+    elif re.search(r'instagram\.com/(?:p|reel|tv|stories)', user_url, re.IGNORECASE):
+        platform_key = 'instagram'
+        platform_name = 'إنستجرام'
+    elif re.search(r'(?:youtube\.com|youtu\.be)', user_url, re.IGNORECASE):
+        platform_key = 'youtube'
+        platform_name = 'يوتيوب'
+    else:
+        # رسالة تنبيهية ذكية إذا أرسل المستخدم نصاً عادياً أو رابطاً غير مدعوم
+        bot.send_message(
+            message.chat.id, 
+            "❌ <b>عذراً، هذا الرابط أو النص غير مدعوم!</b>\nيرجى إرسال رابط فيديو صحيح من منصات: TikTok أو Instagram أو YouTube.", 
+            parse_mode='HTML'
+        )
+        return
 
-    platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
-    platform_name = platforms[platform_key]
-    
     try:
+        # 🎬 معاملة خاصة ليوتيوب لعرض خيارات الصيغة المفضلة للمستخدم
         if platform_key == 'youtube':
             message_id_key = str(message.message_id) 
             links = load_links()
@@ -103,14 +91,24 @@ def process_user_link(message):
             aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{message_id_key}")
             markup.add(vid_btn, aud_btn)
             
-            bot.send_message(message.chat.id, f"✅ تم التعرف على رابط {platform_name}. الرجاء اختيار صيغة التحميل:", reply_markup=markup, parse_mode='HTML')
+            bot.send_message(
+                message.chat.id, 
+                f"⚙️ <b>تم رصد رابط {platform_name}.</b>\nاختر الصيغة التي تفضلها لبدء التحميل:", 
+                reply_markup=markup, 
+                parse_mode='HTML'
+            )
             return
             
-        loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name} (فيديو)...</strong>", parse_mode="html")
+        # 🚀 التحميل المباشر والفوري لتيك توك وإنستجرام
+        loading_msg = bot.send_message(
+            message.chat.id, 
+            f"⚡ <b>تم التعرف تلقائياً على رابط {platform_name}!</b>\n⏳ جارٍ المعالجة وسحب الفيديو الآن...", 
+            parse_mode="HTML"
+        )
         download_media_yt_dlp(bot, message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
             
     except Exception as e:
-        print(f"❌ خطأ في معالجة {platform_name}: {e}")
+        print(f"❌ خطأ في المعالجة التلقائية لـ {platform_name}: {e}")
         if loading_msg:
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
@@ -134,7 +132,7 @@ def handle_final_download(call):
     
     if not user_url:
         bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط.")
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="❌ انتهت صلاحية التحميل. اضغط /start للبدء مجدداً.", parse_mode='HTML')
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="❌ انتهت صلاحية الرابط. أرسله مرة أخرى مباشرة.", parse_mode='HTML')
         return
 
     platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
@@ -143,26 +141,31 @@ def handle_final_download(call):
     
     try:
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"<b>⏳ جارٍ التحميل/التحويل من {platform_name} ({media_type.upper()})...</b>", parse_mode='HTML')
-        download_media_yt_dlp(bot, call.message.chat.id, user_url, platform_name, call.message.message_id, download_as_mp3)
+        download_media_yt_dlp(bot, call.message.chat.id, user_url, platform_name, call.message.message_id, download_as_mp3=download_as_mp3)
     except Exception as e:
         print(f"❌ خطأ حرج في التحميل النهائي {platform_name}: {e}")
         error_msg = str(e).split('\n')[0] 
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
-#              4. آلية التشغيل المتوافقة مع Gunicorn
+#              4. التشغيل الآمن لمنع التعارض (409)
 # ===============================================
 
 def start_polling():
-    print("🧹 تنظيف الـ Webhook المتبقي...")
-    bot.remove_webhook()
-    time.sleep(1)
-    print("🚀 انطلاق البوت بنجاح عبر نظام Polling الآمن...")
-    bot.infinity_polling(skip_pending=True)
+    print("🧹 تنظيف الـ Webhook المتبقي وإعادة تعيين الاتصال...")
+    try:
+        bot.remove_webhook()
+        time.sleep(2)
+    except Exception as e:
+        print(f"⚠️ تنبيه أثناء الحذف: {e}")
 
-# إطلاق البوت تلقائياً فور قيام Gunicorn باستيراد هذا الملف وقبل تشغيل السيرفر
-bot_thread = threading.Thread(target=start_polling)
-bot_thread.daemon = True
-bot_thread.start()
+    print("🚀 انطلاق البوت بنجاح عبر نظام الـ Auto-Detect Polling النقي...")
+    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
 
-# نترك الملف بدون `app.run()` ليتولى Gunicorn إدارته بسلاسة وبدون أي تعارض منافذ
+if __name__ == '__main__':
+    bot_thread = threading.Thread(target=start_polling)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
