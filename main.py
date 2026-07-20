@@ -212,7 +212,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===============================================
 
 def run_single_application():
-    """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409"""
+    """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409 وتجاوز أخطاء الـ Threading"""
     global lock_socket
     
     # حماية من فتح أكثر من Worker عبر Socket Lock
@@ -243,7 +243,13 @@ def run_single_application():
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info("✅ تم قفل السوكت بنجاح. بدء استقبال التحديثات...")
-    application.run_polling(drop_pending_updates=True, close_loop=False)
+    
+    # تعطيل stop_signals لمنع استدعاء set_wakeup_fd خارج Main Thread
+    application.run_polling(
+        drop_pending_updates=True, 
+        stop_signals=None, 
+        close_loop=False
+    )
 
 def start_bot_in_background():
     """بدء تشغيل البوت في ثرد منفصل لمنع حظر Gunicorn"""
