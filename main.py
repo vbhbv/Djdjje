@@ -14,23 +14,19 @@ from handlers.download import download_media_yt_dlp, load_links, save_links
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# الاعتماد الكلي على متغيرات البيئة بدون أي نصوص بديلة
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME") or "@SuPeRx1"
+# وضع التوكن مباشرة داخل الكود لمنع أي تعارض
+BOT_TOKEN = "8913222700:AAETkljjyRrGf-NllmznlCLdprzUQv37Xww"
+CHANNEL_USERNAME = "@SuPeRx1"
 DEVELOPER_USER_ID = "1315011160"
 
-if not BOT_TOKEN:
-    print("❌ خطأ حرج: لم يتم العثور على المتغير البيئي BOT_TOKEN في لوحة التحكم!")
-    sys.exit(1)
-
-# تهيئة البوت وتطبيق Flask الخفيف
+# تهيئة البوت وتطبيق Flask الخفيف لإبقاء السيرفر حياً
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# نقطة وصول وهمية فقط لإبقاء منصة الاستضافة سعيدة وتجعل السيرفر حياً (Health Check)
+# نقطة وصول وهمية لفحص سلامة التطبيق (Health Check) المطلوبة من الاستضافة
 @app.route('/')
 def home():
-    return "Bot is running perfectly via Polling!", 200
+    return "Bot is running perfectly via Polling with Hardcoded Token!", 200
 
 # ===============================================
 #              1. معالجة الأوامر الرئيسية (الواجهة)
@@ -165,11 +161,11 @@ def run_bot():
     bot.infinity_polling(skip_pending=True)
 
 if __name__ == '__main__':
-    # تشغيل البوت في خيط (Thread) منفصل بالخلفية لمنع حظر خادم الويب
+    # تشغيل البوت في خيط (Thread) مستقل بالخلفية لمنع حظر خادم الويب
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
-    # تشغيل خادم Flask للاستماع للمنفذ 8080 المطلوب من الاستضافة
+    # تشغيل خادم Flask للاستماع للمنفذ المتوقع من خادم الاستضافة
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
