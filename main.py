@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot status: Active & Listening via Forced Polling Mode.", 200
+    return "Bot status: Active & Listening via Gunicorn Dynamic Polling.", 200
 
 # ===============================================
 #              1. معالجة الأوامر الرئيسية (الواجهة)
@@ -150,22 +150,19 @@ def handle_final_download(call):
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
-#              4. التشغيل الذكي الآمن
+#              4. آلية التشغيل المتوافقة مع Gunicorn
 # ===============================================
 
-def run_bot():
-    # 🚨 حذف إجباري وصارم لأي ويبهوك قديم معلق في تيليجرام
-    print("🧹 جارٍ تنظيف وحذف أي Webhook قديم معلق...")
+def start_polling():
+    print("🧹 تنظيف الـ Webhook المتبقي...")
     bot.remove_webhook()
-    time.sleep(1) # تأخير بسيط للتأكد من إتمام الحذف بالسيرفرات
-    
-    print("🚀 البوت بدأ الاستماع الفعلي للرسائل عبر Polling...")
+    time.sleep(1)
+    print("🚀 انطلاق البوت بنجاح عبر نظام Polling الآمن...")
     bot.infinity_polling(skip_pending=True)
 
-if __name__ == '__main__':
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+# إطلاق البوت تلقائياً فور قيام Gunicorn باستيراد هذا الملف وقبل تشغيل السيرفر
+bot_thread = threading.Thread(target=start_polling)
+bot_thread.daemon = True
+bot_thread.start()
+
+# نترك الملف بدون `app.run()` ليتولى Gunicorn إدارته بسلاسة وبدون أي تعارض منافذ
