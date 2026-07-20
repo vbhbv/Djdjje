@@ -131,7 +131,7 @@ def handle_final_download(call):
         bot.edit_message_text(
             chat_id=call.message.chat.id, 
             message_id=call.message.message_id, 
-            text=f"⚡ <b>جارٍ التحميل والـ معالجة من {platform_name} ({type_str})...</b>\n⏳ يرجى الانتظار قليلاً.", 
+            text=f"⚡ <b>جارٍ التحميل والمعالجة السريعة من {platform_name} ({type_str})...</b>\n⏳ ثوانٍ معدودة وتكون جاهزة...", 
             parse_mode='HTML'
         )
         download_media_yt_dlp(bot, call.message.chat.id, user_url, platform_name, call.message.message_id, download_as_mp3=download_as_mp3)
