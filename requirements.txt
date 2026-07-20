@@ -1,7 +1,6 @@
-pytelegrambotapi
-flask
-requests
-gunicorn
+python-telegram-bot>=20.0
+asyncpg
 yt-dlp
-ffmpeg-python
+Flask
+gunicorn
 static-ffmpeg
