@@ -1,10 +1,11 @@
-import requests
+import os
+import sys
+import re
+import json
+import threading
+from flask import Flask
 import telebot
 from telebot import types
-import re 
-import os 
-import sys
-import json 
 
 # 🚨 استيراد جميع الدوال من ملف التحميل الخارجي
 from handlers.download import download_media_yt_dlp, load_links, save_links
@@ -13,19 +14,23 @@ from handlers.download import download_media_yt_dlp, load_links, save_links
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة التوكن من المتغيرات البيئية أو ضعه مباشرة بين العلامتين ""
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "هنا_توكن_البوت_الخاص_بك"
-
+# الاعتماد الكلي على متغيرات البيئة بدون أي نصوص بديلة
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME") or "@SuPeRx1"
 DEVELOPER_USER_ID = "1315011160"
-CHANNEL_USERNAME = "@SuPeRx1" 
 
-# التهيئة
-try:
-    bot = telebot.TeleBot(BOT_TOKEN)
-    print("✅ تم تهيئة البوت بنجاح...")
-except Exception as e:
-    print(f"❌ فشل تهيئة البوت. الخطأ: {e}")
+if not BOT_TOKEN:
+    print("❌ خطأ حرج: لم يتم العثور على المتغير البيئي BOT_TOKEN في لوحة التحكم!")
     sys.exit(1)
+
+# تهيئة البوت وتطبيق Flask الخفيف
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
+
+# نقطة وصول وهمية فقط لإبقاء منصة الاستضافة سعيدة وتجعل السيرفر حياً (Health Check)
+@app.route('/')
+def home():
+    return "Bot is running perfectly via Polling!", 200
 
 # ===============================================
 #              1. معالجة الأوامر الرئيسية (الواجهة)
@@ -74,12 +79,10 @@ def process_user_link(message):
     loading_msg = None
     platform_key = getattr(message, 'platform_key', None) 
     
-    # 1. التحقق من إلغاء العملية
     if user_url.startswith('/'):
         bot.send_message(message.chat.id, "❌ تم إلغاء العملية. اضغط /start.", parse_mode='HTML')
         return send_welcome(message)
 
-    # 2. تحديد المنصة بناءً على الرابط
     if not platform_key:
         if re.match(r'https?://(?:www\.)?(?:tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com)/', user_url):
             platform_key = 'tiktok'
@@ -95,10 +98,8 @@ def process_user_link(message):
     platform_name = platforms[platform_key]
     
     try:
-        # 3. إرسال خيار التحويل لليوتيوب فقط 
         if platform_key == 'youtube':
             message_id_key = str(message.message_id) 
-            
             links = load_links()
             links[message_id_key] = user_url
             save_links(links) 
@@ -111,7 +112,6 @@ def process_user_link(message):
             bot.send_message(message.chat.id, f"✅ تم التعرف على رابط {platform_name}. الرجاء اختيار صيغة التحميل:", reply_markup=markup, parse_mode='HTML')
             return
             
-        # 4. بدء عملية التحميل المباشر لـ تيك توك وإنستجرام (فيديو فقط)
         loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name} (فيديو)...</strong>", parse_mode="html")
         download_media_yt_dlp(bot, message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
             
@@ -156,10 +156,20 @@ def handle_final_download(call):
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
-#              4. تشغيل البوت بنظام Polling
+#              4. التشغيل الذكي (Flask + Polling)
 # ===============================================
 
-if __name__ == '__main__':
-    print("🚀 البوت بدأ العمل بنظام Polling المستمر الآن...")
-    bot.remove_webhook() # إزالة أي ويبهوك قديم معلق
+def run_bot():
+    print("🚀 البوت بدأ العمل بنظام Polling في خلفية السيرفر...")
+    bot.remove_webhook()
     bot.infinity_polling(skip_pending=True)
+
+if __name__ == '__main__':
+    # تشغيل البوت في خيط (Thread) منفصل بالخلفية لمنع حظر خادم الويب
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # تشغيل خادم Flask للاستماع للمنفذ 8080 المطلوب من الاستضافة
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
