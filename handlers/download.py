@@ -14,7 +14,7 @@ try:
 except Exception as e:
     print(f"⚠️ تنبيه أثناء إعداد static_ffmpeg: {e}")
 
-# 🚨 ملف JSON للتخزين الدائم لروابط يوتيوب
+# 🚨 ملف JSON للتخزين الدائم لروابط الروابط المؤقتة
 TEMP_STORAGE_FILE = 'temp_links.json' 
 
 def load_links():
@@ -42,7 +42,7 @@ def save_links(data):
 
 def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, download_as_mp3=False):
     """
-    دالة متخصصة للتحميل المباشر باستخدام yt-dlp وإرسال الملف.
+    دالة متخصصة للتحميل المباشر والسريع جداً من (TikTok, Instagram, YouTube) بصيغة فيديو أو صوت.
     تستخدم مساراً مؤقتاً لضمان حذف الملفات فوراً بعد الإرسال لحماية موارد السيرفر.
     """
     
@@ -56,7 +56,7 @@ def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, down
             'quiet': True,
             'no_warnings': True,
             'cookiefile': None,
-            # 💡 تجاوز قيود يوتيوب عبر عميل الهاتف
+            # 💡 تجاوز قيود يوتيوب والمنصات الأخرى عبر عميل الهاتف
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android', 'ios']
@@ -70,28 +70,34 @@ def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, down
             'max_filesize': 500 * 1024 * 1024,
         }
         
+        # ⚡⚡ إعدادات السرعة الخارقة للتحويل للصوت MP3 ⚡⚡
         if download_as_mp3:
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality': '128',  # 128k تسرع المعالجة بضعفين دون تأثير ملموس على الجودة
             }]
+            # 🚀 إعطاء أوامر السرعة القصوى لـ FFmpeg
+            ydl_opts['postprocessor_args'] = [
+                '-threads', '2',
+                '-preset', 'ultrafast'
+            ]
         else:
-            # تفضيل صيغ mp4 المتوافقة مباشرة مع المشغلات
+            # تفضيل صيغ mp4 المتوافقة مباشرة مع جميع المشغلات
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 
         try:
             # 1. بدء التنزيل/التحويل عبر yt-dlp
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                # استخراج المسار الفعلي للملف المحمل
                 downloaded_file = ydl.prepare_filename(info)
+                
+                # إذا طلب المستخدم MP3، تتكفل FFmpeg بتحويله فتتغير صيغة الملف الناتج إلى mp3
                 if download_as_mp3:
-                    # تعديل امتداد المسار عند التحويل لـ MP3
                     downloaded_file = os.path.splitext(downloaded_file)[0] + '.mp3'
 
-            # 2. حذف رسالة "جاري التحميل" لتنظيف الشات
+            # 2. حذف رسالة التنبيه/الانتظار لتنظيف الشات
             try:
                 bot.delete_message(chat_id, loading_msg_id)
             except Exception:
@@ -130,10 +136,9 @@ def download_media_yt_dlp(bot, chat_id, url, platform_name, loading_msg_id, down
                         )
                 return True
             else:
-                raise Exception(f"لم يتم العثور على الملف بعد انتهاء عملية yt-dlp.")
+                raise Exception("لم يتم العثور على الملف بعد انتهاء عملية yt-dlp.")
 
         except Exception as e:
-            # مسح رسالة التحميل في حال حدث الخطأ داخل التكتل
             try:
                 bot.delete_message(chat_id, loading_msg_id)
             except Exception:
