@@ -1,10 +1,10 @@
 import os
 import sys
 import re
-import json
 import logging
 import socket
 import threading
+import asyncio
 from flask import Flask
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
@@ -31,6 +31,7 @@ from admin import (
     handle_admin_inputs
 )
 
+# إعداد التسجيل
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO
@@ -44,14 +45,14 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.critical("❌ متغير البيئة BOT_TOKEN غير مضبوط!")
-    sys.exit(1)
 
 app = Flask(__name__)
 lock_socket = None
+bot_started = False
 
 @app.route('/')
 def home():
-    return "Bot Status: Online | PostgreSQL & Admin Ready", 200
+    return "Bot Status: Online | PostgreSQL & Admin Panel Active", 200
 
 # ===============================================
 #              1. الوساطة والتحقق (Middleware)
@@ -212,8 +213,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_single_application():
     """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409"""
-    # إنشاء الجداول في PostgreSQL عند الإقلاع
-    asyncio.get_event_loop().run_until_complete(init_db())
+    global lock_socket
+    
+    # حماية من فتح أكثر من Worker عبر Socket Lock
+    try:
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lock_socket.bind(('127.0.0.1', 47201))
+    except socket.error:
+        logger.info("ℹ️ يوجد Worker شغال حالياً، تم إيقاف المجرى الحالي لتفادي تعارض 409 Conflict.")
+        return
+
+    # إنشاء Async Loop جديد للثرد
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # إنشاء الجداول في PostgreSQL
+    loop.run_until_complete(init_db())
+
+    if not BOT_TOKEN:
+        logger.critical("❌ لا يمكن تشغيل البوت بدون BOT_TOKEN")
+        return
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -223,20 +242,21 @@ def run_single_application():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    global lock_socket
-    try:
-        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        lock_socket.bind(('127.0.0.1', 47201))
-        
-        logger.info("✅ تم قفل السوكت لمنع التكرار. بدء استقبال التحديثات...")
-        application.run_polling(drop_pending_updates=True)
-    except socket.error:
-        logger.error("ℹ️ يوجد Worker شغال حالياً، تم إيقاف هذا العمل لتفادي تعارض 409 Conflict.")
+    logger.info("✅ تم قفل السوكت بنجاح. بدء استقبال التحديثات...")
+    application.run_polling(drop_pending_updates=True, close_loop=False)
+
+def start_bot_in_background():
+    """بدء تشغيل البوت في ثرد منفصل لمنع حظر Gunicorn"""
+    global bot_started
+    if not bot_started:
+        bot_started = True
+        bot_thread = threading.Thread(target=run_single_application, daemon=True)
+        bot_thread.start()
+
+# تشغيل البوت تلقائياً عند استدعاء الملف عبر Gunicorn
+start_bot_in_background()
 
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=run_single_application)
-    bot_thread.daemon = True
-    bot_thread.start()
-
+    # للتشغيل المحلي المباشر
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
