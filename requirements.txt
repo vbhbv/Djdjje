@@ -4,4 +4,4 @@ requests
 gunicorn
 yt-dlp
 ffmpeg-python
-
+static-ffmpeg
