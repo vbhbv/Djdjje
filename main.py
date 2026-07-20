@@ -1,4 +1,4 @@
-Import requests
+import requests
 import telebot
 from telebot import types
 from flask import Flask, request
