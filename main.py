@@ -4,6 +4,7 @@ import re
 import json
 import threading
 import time
+import socket
 from flask import Flask
 import telebot
 from telebot import types
@@ -22,9 +23,12 @@ DEVELOPER_USER_ID = "1315011160"
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
+# متغير عام للحفاظ على مرجع الـ Socket حتى لا يُغلق تلقائياً بواسطة الـ Garbage Collector
+lock_socket = None
+
 @app.route('/')
 def home():
-    return "Bot status: Active & Running Pure Auto-Detect Mode.", 200
+    return "Bot status: Active & Running Single Instance Auto-Detect Mode.", 200
 
 # ===============================================
 #              1. معالجة الأوامر الرئيسية (الواجهة)
@@ -34,14 +38,13 @@ def home():
 def send_welcome(message):
     first_name = message.from_user.first_name if message.from_user else "صديقنا"
     
-    # واجهة مستخدم نقية وسريعة بدون أي أزرار مشتتة
     bot.send_message(
         message.chat.id,
         f"""<b>مرحباً بك {first_name}!</b> 👋
 أنا بوت التحميل الشامل والسريع.
 
 🚀 <b>طريقة الاستخدام:</b>
-كل ما عليك فعله هو إرسال رابط الفيديو مباشرة في الشات (تيك توك، إنستجرام، أو يوتيوب).
+أرسل رابط الفيديو مباشرة في الشات (تيك توك، إنستجرام، أو يوتيوب).
 سأقوم بالتعرف على المنصة وتحميل مقطعك تلقائياً وبسرعة!""",
         parse_mode='HTML'
     )
@@ -55,7 +58,6 @@ def auto_detect_and_process_link(message):
     user_url = message.text.strip() if message.text else ""
     loading_msg = None
     
-    # تجاهل الأوامر الاعتيادية كأمر التشغيل
     if user_url.startswith('/'):
         return
 
@@ -70,7 +72,6 @@ def auto_detect_and_process_link(message):
         platform_key = 'youtube'
         platform_name = 'يوتيوب'
     else:
-        # رسالة تنبيهية ذكية إذا أرسل المستخدم نصاً عادياً أو رابطاً غير مدعوم
         bot.send_message(
             message.chat.id, 
             "❌ <b>عذراً، هذا الرابط أو النص غير مدعوم!</b>\nيرجى إرسال رابط فيديو صحيح من منصات: TikTok أو Instagram أو YouTube.", 
@@ -79,7 +80,7 @@ def auto_detect_and_process_link(message):
         return
 
     try:
-        # 🎬 معاملة خاصة ليوتيوب لعرض خيارات الصيغة المفضلة للمستخدم
+        # 🎬 معاملة خاصة ليوتيوب لعرض خيارات الصيغة (فيديو / صوت)
         if platform_key == 'youtube':
             message_id_key = str(message.message_id) 
             links = load_links()
@@ -99,7 +100,7 @@ def auto_detect_and_process_link(message):
             )
             return
             
-        # 🚀 التحميل المباشر والفوري لتيك توك وإنستجرام
+        # 🚀 التحميل المباشر لتيك توك وإنستجرام
         loading_msg = bot.send_message(
             message.chat.id, 
             f"⚡ <b>تم التعرف تلقائياً على رابط {platform_name}!</b>\n⏳ جارٍ المعالجة وسحب الفيديو الآن...", 
@@ -148,7 +149,7 @@ def handle_final_download(call):
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
-#              4. التشغيل الآمن لمنع التعارض (409)
+#   4. آلية التشغيل الذكية (الحماية من 409 Conflict)
 # ===============================================
 
 def start_polling():
@@ -162,10 +163,23 @@ def start_polling():
     print("🚀 انطلاق البوت بنجاح عبر نظام الـ Auto-Detect Polling النقي...")
     bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
 
+def run_single_bot_instance():
+    global lock_socket
+    try:
+        # حجز بورت محلي صامت يمنع تشغيل أكثر من Worker للبوت
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lock_socket.bind(('127.0.0.1', 47200))
+        
+        bot_thread = threading.Thread(target=start_polling)
+        bot_thread.daemon = True
+        bot_thread.start()
+        print("✅ تم تأكيد تشغيل عملية Polling واحدة فقط للبوت بنجاح.")
+    except socket.error:
+        print("ℹ️ Worker إضافي تم تجنبه تلقائياً لمنع تعارض (409 Conflict).")
+
+# تشغيل الفحص والحماية فوراً
+run_single_bot_instance()
+
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=start_polling)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
