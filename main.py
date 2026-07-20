@@ -1,7 +1,6 @@
 import requests
 import telebot
 from telebot import types
-from flask import Flask, request
 import re 
 import os 
 import sys
@@ -14,41 +13,22 @@ from handlers.download import download_media_yt_dlp, load_links, save_links
 #              0. الإعدادات والثوابت والتهيئة
 # ===============================================
 
-# قراءة المتغيرات البيئية
-BOT_TOKEN = os.getenv("BOT_TOKEN") 
-WEBHOOK_URL_BASE = os.getenv("WEBHOOK_URL") 
-WEBHOOK_URL_PATH = "/{}".format(BOT_TOKEN) 
+# قراءة التوكن من المتغيرات البيئية أو ضعه مباشرة بين العلامتين ""
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "هنا_توكن_البوت_الخاص_بك"
 
 DEVELOPER_USER_ID = "1315011160"
-CHANNEL_USERNAME = "@SuPeRx1" # يُفضل وضعه كمتغير بيئي أيضاً
+CHANNEL_USERNAME = "@SuPeRx1" 
 
 # التهيئة
 try:
     bot = telebot.TeleBot(BOT_TOKEN)
-    app = Flask(__name__) 
+    print("✅ تم تهيئة البوت بنجاح...")
 except Exception as e:
-    print(f"❌ فشل تهيئة البوت/Flask. الخطأ: {e}")
+    print(f"❌ فشل تهيئة البوت. الخطأ: {e}")
+    sys.exit(1)
 
 # ===============================================
-#              1. نقاط وصول Webhook
-# ===============================================
-
-@app.route(WEBHOOK_URL_PATH, methods=['POST'])
-def webhook():
-    """نقطة النهاية التي يستقبل منها البوت تحديثات تيليجرام."""
-    if request.headers.get('content-type') == 'application/json':
-        try:
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-        except Exception as e:
-            print(f"❌ خطأ حرج في معالجة Webhook: {e}")
-        return '', 200 
-    else:
-        return 'Error', 403
-
-# ===============================================
-#              2. معالجة الأوامر الرئيسية (الواجهة)
+#              1. معالجة الأوامر الرئيسية (الواجهة)
 # ===============================================
 
 @bot.message_handler(commands=["start"])
@@ -63,9 +43,8 @@ def send_welcome(message):
     bot.send_message(
         message.chat.id,
         f"""<b>مرحباً بك {first_name}!</b> 👋
-        أنا بوت التحميل الشامل. اختر المنصة التي تريد التحميل منها:
-        * اختر من القائمة أدناه وأرسل <b>الرابط فوراً</b>.
-        """,
+أنا بوت التحميل الشامل. اختر المنصة التي تريد التحميل منها:
+* اختر من القائمة أدناه وأرسل <b>الرابط فوراً</b>.""",
         parse_mode='HTML', 
         reply_markup=markup
     )
@@ -79,14 +58,14 @@ def handle_download_choice(call):
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=f"""<b>🚀 أرسل رابط فيديو {platform} الآن!</b>""",
+        text=f"<b>🚀 أرسل رابط فيديو {platform} الآن!</b>",
         parse_mode='HTML' 
     )
     call.message.platform_key = platform_key 
     bot.register_next_step_handler(call.message, process_user_link)
     
 # ===============================================
-#              3. الدالة الرئيسية الموحدة للمعالجة
+#              2. الدالة الرئيسية الموحدة للمعالجة
 # ===============================================
 
 @bot.message_handler(func=lambda m: True)
@@ -110,15 +89,14 @@ def process_user_link(message):
             platform_key = 'youtube'
         else:
             bot.send_message(message.chat.id, "❌ **الرابط غير صالح!** يرجى إرسال رابط صحيح.", parse_mode='HTML')
-            return send_welcome(message)
-    
+            return
+
     platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
     platform_name = platforms[platform_key]
     
     try:
         # 3. إرسال خيار التحويل لليوتيوب فقط 
         if platform_key == 'youtube':
-            
             message_id_key = str(message.message_id) 
             
             links = load_links()
@@ -126,7 +104,6 @@ def process_user_link(message):
             save_links(links) 
             
             markup = types.InlineKeyboardMarkup()
-            # تمرير المفتاح القصير بدلاً من الرابط الطويل
             vid_btn = types.InlineKeyboardButton("تحميل فيديو 🎥", callback_data=f"final_dl_{platform_key}_video_{message_id_key}")
             aud_btn = types.InlineKeyboardButton("تحويل إلى صوت 🎧 (MP3)", callback_data=f"final_dl_{platform_key}_audio_{message_id_key}")
             markup.add(vid_btn, aud_btn)
@@ -136,52 +113,34 @@ def process_user_link(message):
             
         # 4. بدء عملية التحميل المباشر لـ تيك توك وإنستجرام (فيديو فقط)
         loading_msg = bot.send_message(message.chat.id, f"<strong>⏳ جارٍ التحميل المباشر من {platform_name} (فيديو)...</strong>", parse_mode="html")
-        
-        # 🚨 استدعاء الدالة من الملف الخارجي (handlers/download.py)
         download_media_yt_dlp(bot, message.chat.id, user_url, platform_name, loading_msg.message_id, download_as_mp3=False)
             
     except Exception as e:
-        # 5. معالجة الأخطاء
-        print(f"=====================================================")
-        print(f"❌ خطأ حرج في معالجة {platform_name or 'التحميل'}: {e}") 
-        print(f"=====================================================")
-        
+        print(f"❌ خطأ في معالجة {platform_name}: {e}")
         if loading_msg:
              try: bot.delete_message(message.chat.id, loading_msg.message_id) 
              except: pass 
-        
         error_msg = str(e).split('\n')[0] 
-        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name or 'الملف'}: <b>{error_msg}</b>", parse_mode='HTML')
-        
-    finally:
-        # 6. إنهاء العملية
-        bot.send_message(message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
 
 # ===============================================
-#              4. معالجة التحميل النهائي (MP3/فيديو)
+#              3. معالجة التحميل النهائي (MP3/فيديو)
 # ===============================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('final_dl_'))
 def handle_final_download(call):
-    # final_dl_platform_type_message_id_key
     parts = call.data.split('_')
     platform_key = parts[2]
     media_type = parts[3] 
     message_id_key = parts[4] 
     
-    # 🚨 استرداد الرابط من ملف JSON وحذفه منه
     links = load_links()
     user_url = links.pop(message_id_key, None) 
     save_links(links) 
     
     if not user_url:
-        bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط أو تم تحميله مسبقاً.")
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=f"❌ انتهت صلاحية التحميل. اضغط /start للبدء مجدداً.",
-            parse_mode='HTML'
-        )
+        bot.answer_callback_query(call.id, "❌ انتهت صلاحية هذا الرابط.")
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="❌ انتهت صلاحية التحميل. اضغط /start للبدء مجدداً.", parse_mode='HTML')
         return
 
     platforms = {'tiktok': 'تيك توك', 'instagram': 'إنستجرام', 'youtube': 'يوتيوب'}
@@ -189,41 +148,18 @@ def handle_final_download(call):
     download_as_mp3 = (media_type == 'audio')
     
     try:
-        # 1. تحديث رسالة التحميل
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=f"<b>⏳ جارٍ التحميل/التحويل من {platform_name} ({media_type.upper()})...</b>",
-            parse_mode='HTML'
-        )
-        
-        # 2. استدعاء دالة التنزيل المتخصصة
-        download_media_yt_dlp(
-            bot, # 🚨 تمرير البوت للدالة الخارجية
-            call.message.chat.id,
-            user_url,
-            platform_name,
-            call.message.message_id,
-            download_as_mp3
-        )
-        
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"<b>⏳ جارٍ التحميل/التحويل من {platform_name} ({media_type.upper()})...</b>", parse_mode='HTML')
+        download_media_yt_dlp(bot, call.message.chat.id, user_url, platform_name, call.message.message_id, download_as_mp3)
     except Exception as e:
-        # 3. معالجة الأخطاء
-        print(f"=====================================================")
-        print(f"❌ خطأ حرج في التحميل النهائي {platform_name}: {e}") 
-        print(f"=====================================================")
-        
+        print(f"❌ خطأ حرج في التحميل النهائي {platform_name}: {e}")
         error_msg = str(e).split('\n')[0] 
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء تحميل {platform_name}: <b>{error_msg}</b>", parse_mode='HTML')
-        
-    finally:
-        bot.send_message(call.message.chat.id, "اضغط على الأمر /start للعودة إلى القائمة الرئيسية.", parse_mode='HTML')
 
 # ===============================================
-#              5. تهيئة Webhook
+#              4. تشغيل البوت بنظام Polling
 # ===============================================
 
 if __name__ == '__main__':
-    bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL_BASE + WEBHOOK_URL_PATH)
-    print('✅ البوت جاهز للتشغيل بواسطة Gunicorn...')
+    print("🚀 البوت بدأ العمل بنظام Polling المستمر الآن...")
+    bot.remove_webhook() # إزالة أي ويبهوك قديم معلق
+    bot.infinity_polling(skip_pending=True)
