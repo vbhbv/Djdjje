@@ -3,8 +3,9 @@ import json
 import logging
 import asyncio
 import glob
+import urllib.parse
 import yt_dlp
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ async def download_media_yt_dlp(
     download_as_mp3: bool = False
 ):
     """
-    تحميل الوسائط باستخدام yt-dlp وإرسالها مباشرة بدون الحاجة لـ FFmpeg
+    تحميل الوسائط باستخدام yt-dlp وإرسالها مباشرة مع زر المشاركة ويوزر البوت
     """
     download_dir = "downloads"
     os.makedirs(download_dir, exist_ok=True)
@@ -55,7 +56,7 @@ async def download_media_yt_dlp(
     # قالب حفظ الملف باسم المعرف فريد لمنع التداخل
     out_template = os.path.join(download_dir, "%(id)s.%(ext)s")
 
-    # إعدادات التنزيل المباشر المعتمدة على السيرفرات دون معالجة Postprocessing
+    # إعدادات التنزيل المباشر
     if download_as_mp3:
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -92,28 +93,40 @@ async def download_media_yt_dlp(
 
     file_path = None
     try:
-        # تشغيل التنزيل داخل Executor حتى لا يتأثر الأداء العام للبوت
+        # تشغيل التنزيل داخل Executor
         file_path, title = await loop.run_in_executor(None, _extract_and_download)
 
         if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError("لم يتم العثور على الملف بعد التنزيل.")
 
-        # إرسال الملف بناءً على الخيار المحدد
+        # تجهيز زر مشاركة البوت مع الأصدقاء
+        share_text = urllib.parse.quote("جرب هذا البوت الممتاز لتنزيل الفيديوهات والصوتيات من مختلف المنصات! ⚡")
+        share_url = f"https://t.me/share/url?url=https://t.me/Seagebot&text={share_text}"
+        
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("مشاركة مع الأصدقاء", url=share_url)]
+        ])
+
+        # إرسال الملف بناءً على الخيار المحدد مع يوزر البوت وزر المشاركة
         with open(file_path, 'rb') as media_file:
             if download_as_mp3:
+                caption_text = f"🎵 **{title}**\n\n@Seagebot"
                 await bot.send_audio(
                     chat_id=chat_id,
                     audio=media_file,
                     title=title,
-                    caption=f"🎵 **{title}**\n\nتم التحميل بواسة @Seagebot",
-                    parse_mode='Markdown'
+                    caption=caption_text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
                 )
             else:
+                caption_text = f"🎥 **{title}**\n\n@Seagebot"
                 await bot.send_video(
                     chat_id=chat_id,
                     video=media_file,
-                    caption=f"🎥 **{title}**\n\nتم التحميل من {platform_name} 🚀",
-                    parse_mode='Markdown'
+                    caption=caption_text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
                 )
 
         # حذف رسالة "جارٍ التحميل..." عند الانتهاء
