@@ -4,6 +4,8 @@ import logging
 import asyncio
 import glob
 import re
+import shutil
+import subprocess
 import uuid
 import time
 import urllib.parse
@@ -18,9 +20,43 @@ LINKS_FILE = "temp_links.json"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Seagebot")
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024  # حد Bot API القياسي
 
+# مسارات كوكيز اختيارية لكل منصة (تُرفع كملفات على Railway إن رغبت)
+YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "")
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "")
+TIKTOK_COOKIES_FILE = os.getenv("TIKTOK_COOKIES_FILE", "")
+
 # قفل لمنع تحميل نفس الرابط بشكل متزامن من عدة مستخدمين
 _active_downloads: dict[str, asyncio.Lock] = {}
 _active_downloads_guard = asyncio.Lock()
+
+
+# ===============================================
+#     0. التحقق من توفر ffmpeg عند تحميل الوحدة
+# ===============================================
+
+def _detect_ffmpeg() -> str | None:
+    """
+    يبحث عن ffmpeg في PATH أو في FFMPEG_LOCATION من البيئة.
+    يُسجَّل تحذير واضح مرة واحدة عند الإقلاع بدل فشل صامت متكرر لاحقًا.
+    """
+    env_path = os.getenv("FFMPEG_LOCATION", "")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    logger.warning(
+        "⚠️ ffmpeg غير موجود على هذا السيرفر. تحويل MP3 ودمج بعض جودات الفيديو "
+        "لن يعمل. أضف `RUN apt-get update && apt-get install -y ffmpeg` "
+        "إلى Dockerfile وأعد النشر."
+    )
+    return None
+
+
+FFMPEG_PATH = _detect_ffmpeg()
+FFMPEG_AVAILABLE = FFMPEG_PATH is not None
 
 
 # ===============================================
@@ -79,6 +115,17 @@ def _human_size(num_bytes: int) -> str:
     return f"{size:.1f}TB"
 
 
+def _detect_platform(url: str) -> str:
+    url_l = url.lower()
+    if "tiktok" in url_l:
+        return "tiktok"
+    if "instagram" in url_l:
+        return "instagram"
+    if "youtube" in url_l or "youtu.be" in url_l:
+        return "youtube"
+    return "generic"
+
+
 async def _get_lock_for_url(url: str) -> asyncio.Lock:
     async with _active_downloads_guard:
         if url not in _active_downloads:
@@ -87,7 +134,7 @@ async def _get_lock_for_url(url: str) -> asyncio.Lock:
 
 
 # ===============================================
-#          3. مجموعات إعدادات yt-dlp للتفادي والتسريع
+#     3. مجموعات إعدادات yt-dlp للتفادي والتسريع
 # ===============================================
 
 _MOBILE_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) '
@@ -111,9 +158,9 @@ def _base_headers(user_agent: str) -> dict:
 
 def _speed_opts() -> dict:
     """إعدادات مشتركة لتسريع التحميل عبر التوازي الحقيقي للأجزاء"""
-    return {
-        'concurrent_fragment_downloads': 8,   # تنزيل عدة أجزاء بالتوازي بدل التسلسل
-        'http_chunk_size': 10 * 1024 * 1024,  # جلب الملفات الكبيرة على أجزاء 10MB بالتوازي
+    opts = {
+        'concurrent_fragment_downloads': 8,
+        'http_chunk_size': 10 * 1024 * 1024,
         'socket_timeout': 20,
         'retries': 5,
         'fragment_retries': 5,
@@ -127,54 +174,96 @@ def _speed_opts() -> dict:
         'noplaylist': True,
         'noprogress': True,
     }
+    if FFMPEG_PATH:
+        opts['ffmpeg_location'] = FFMPEG_PATH
+    return opts
 
 
-def _build_strategy_chain(out_template: str, download_as_mp3: bool) -> list[dict]:
+def _cookies_for(platform: str) -> str | None:
+    mapping = {
+        'youtube': YOUTUBE_COOKIES_FILE,
+        'instagram': INSTAGRAM_COOKIES_FILE,
+        'tiktok': TIKTOK_COOKIES_FILE,
+    }
+    path = mapping.get(platform, "")
+    return path if path and os.path.exists(path) else None
+
+
+def _build_strategy_chain(out_template: str, download_as_mp3: bool, platform: str) -> list[dict]:
     """
     عدة استراتيجيات متدرجة (User-Agent + extractor client مختلفين) تُجرَّب
-    بالتتابع حتى تنجح واحدة — يرفع نسبة النجاح ضد حظر المنصات (خصوصًا
-    إنستغرام وتيك توك) دون إبطاء الحالة الشائعة (المحاولة الأولى تنجح غالبًا).
+    بالتتابع. الترتيب يُخصَّص حسب المنصة بناءً على ملاحظات فعلية من اللوج:
+    - إنستغرام: الاستراتيجية الافتراضية الأولى تفشل بثبات بدون كوكيز،
+      لذا تُدفع لاحقًا لتوفير وقت.
+    - تيك توك: الفشل الحالي غالبًا خلل مستخرج داخلي في yt-dlp (status code 0)
+      وليس حظر IP، لذا الأولوية لاستخدام كوكيز إن توفرت + إصدار محدّث.
     """
     audio_fmt = 'bestaudio/best'
     video_fmt = 'best[ext=mp4]/best'
     fmt = audio_fmt if download_as_mp3 else video_fmt
 
-    strategies = []
+    def strategy_mobile_ios():
+        opts = {
+            **_speed_opts(),
+            'outtmpl': out_template,
+            'format': fmt,
+            'http_headers': _base_headers(_MOBILE_UA),
+            'extractor_args': {'instagram': {'refer_to_author': True}},
+        }
+        cookies = _cookies_for(platform)
+        if cookies:
+            opts['cookiefile'] = cookies
+        return opts
 
-    # الاستراتيجية 1: موبايل iOS + إعدادات إنستغرام الخاصة
-    strategies.append({
-        **_speed_opts(),
-        'outtmpl': out_template,
-        'format': fmt,
-        'http_headers': _base_headers(_MOBILE_UA),
-        'extractor_args': {'instagram': {'refer_to_author': True}},
-    })
+    def strategy_desktop_android_client():
+        opts = {
+            **_speed_opts(),
+            'outtmpl': out_template,
+            'format': 'best' if not download_as_mp3 else audio_fmt,
+            'http_headers': _base_headers(_DESKTOP_UA),
+            'extractor_args': {'youtube': {'player_client': ['android', 'tv']}},
+        }
+        cookies = _cookies_for(platform)
+        if cookies:
+            opts['cookiefile'] = cookies
+        return opts
 
-    # الاستراتيجية 2: ديسكتوب Chrome + client=android لليوتيوب (يتجاوز بعض قيود PO Token)
-    strategies.append({
-        **_speed_opts(),
-        'outtmpl': out_template,
-        'format': 'best' if not download_as_mp3 else audio_fmt,
-        'http_headers': _base_headers(_DESKTOP_UA),
-        'extractor_args': {'youtube': {'player_client': ['android']}},
-    })
+    def strategy_android_native():
+        opts = {
+            **_speed_opts(),
+            'outtmpl': out_template,
+            'format': fmt,
+            'http_headers': _base_headers(_ANDROID_UA),
+            'extractor_args': {'tiktok': {'app_version': ['34.1.2'], 'manifest_app_version': ['2023506030']}},
+        }
+        cookies = _cookies_for(platform)
+        if cookies:
+            opts['cookiefile'] = cookies
+        return opts
 
-    # الاستراتيجية 3: أندرويد + استخراج بدون فحص تنسيقات مسبق (أخف على السيرفر)
-    strategies.append({
-        **_speed_opts(),
-        'outtmpl': out_template,
-        'format': 'worst' if False else fmt,  # يبقى نفس الجودة المطلوبة، خط دفاع أخير
-        'http_headers': _base_headers(_ANDROID_UA),
-        'extractor_args': {'tiktok': {'app_version': ['34.1.2']}},
-    })
+    # ترتيب افتراضي
+    strategies = [strategy_mobile_ios(), strategy_desktop_android_client(), strategy_android_native()]
 
-    if download_as_mp3:
+    # إنستغرام: الاستراتيجية الأولى (mobile_ios) معروفة بالفشل الثابت هنا
+    # بدون كوكيز → إن لم تتوفر كوكيز، ابدأ بالثانية مباشرة لتوفير الوقت.
+    if platform == "instagram" and not _cookies_for("instagram"):
+        strategies = [strategy_desktop_android_client(), strategy_mobile_ios(), strategy_android_native()]
+
+    # تيك توك: قدّم النسخة المزوّدة بإعدادات تيك توك الخاصة أولاً
+    if platform == "tiktok":
+        strategies = [strategy_android_native(), strategy_mobile_ios(), strategy_desktop_android_client()]
+
+    if download_as_mp3 and FFMPEG_AVAILABLE:
         for opts in strategies:
             opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }]
+    elif download_as_mp3 and not FFMPEG_AVAILABLE:
+        # لا نضيف postprocessor لأن ffmpeg غير متوفر — سنُرسل الصوت الخام
+        # ونُعلم المستخدم لاحقًا بدل فشل العملية بالكامل بخطأ Postprocessing
+        pass
 
     return strategies
 
@@ -191,7 +280,6 @@ async def download_media_yt_dlp(
     status_msg_id: int,
     download_as_mp3: bool = False
 ):
-    # قفل خاص بهذا الرابط تحديدًا: يمنع تحميل مكرر متزامن لنفس المحتوى
     lock = await _get_lock_for_url(url)
     async with lock:
         await _run_download(bot, chat_id, url, platform_name, status_msg_id, download_as_mp3)
@@ -212,7 +300,10 @@ async def _run_download(
     os.makedirs(download_dir, exist_ok=True)
     out_template = os.path.join(download_dir, "%(id)s.%(ext)s")
 
-    strategies = _build_strategy_chain(out_template, download_as_mp3)
+    platform = _detect_platform(url)
+    mp3_requested_but_no_ffmpeg = download_as_mp3 and not FFMPEG_AVAILABLE
+
+    strategies = _build_strategy_chain(out_template, download_as_mp3, platform)
     excluded_ext = {'.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl'}
 
     loop = asyncio.get_running_loop()
@@ -271,7 +362,9 @@ async def _run_download(
 
         with open(file_path, 'rb') as media_file:
             if download_as_mp3:
-                caption_text = f"🎵 **{safe_title}**\n\n@{BOT_USERNAME}" if safe_title else f"@{BOT_USERNAME}"
+                note = "\n\n⚠️ تم الإرسال بالصيغة الأصلية (ffmpeg غير متوفر حاليًا)" if mp3_requested_but_no_ffmpeg else ""
+                caption_text = (f"🎵 **{safe_title}**{note}\n\n@{BOT_USERNAME}"
+                                 if safe_title else f"@{BOT_USERNAME}{note}")
                 await bot.send_audio(
                     chat_id=chat_id,
                     audio=media_file,
@@ -308,7 +401,11 @@ async def _run_download(
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
-                text="❌ **تعذر تنزيل هذا المنشور.**\nقد يكون الحساب خاصاً (Private) أو يفرض المصدر حماية مؤقتة على الرابط.",
+                text=(
+                    "❌ **تعذر تنزيل هذا المنشور.**\n"
+                    "قد يكون الحساب خاصاً (Private)، أو يفرض المصدر حماية مؤقتة، "
+                    "أو أن المنصة غيّرت آلية عملها ويحتاج الأمر تحديث الأداة."
+                ),
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception:
