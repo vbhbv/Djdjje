@@ -105,7 +105,7 @@ async def download_media_yt_dlp(
                     chat_id=chat_id,
                     audio=media_file,
                     title=title,
-                    caption=f"🎵 **{title}**\n\nتم التحميل بواسطة البوت ⚡",
+                    caption=f"🎵 **{title}**\n\nتم التحميل بواسة @Seagebot",
                     parse_mode='Markdown'
                 )
             else:
