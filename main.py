@@ -17,8 +17,14 @@ from telegram.ext import (
     filters
 )
 
-# استيراد وحدة التنزيل
-from handlers.download import download_media_yt_dlp, load_links, save_links
+# استيراد وحدة التنزيل مع متغيرات ومتطلبات FFMPEG للتحميل المسبق (Pre-warm)
+from handlers.download import (
+    download_media_yt_dlp, 
+    load_links, 
+    save_links, 
+    FFMPEG_AVAILABLE, 
+    FFMPEG_PATH
+)
 
 # استيراد دالات لوحة التحكم وقاعدة البيانات من admin.py
 from admin import (
@@ -211,6 +217,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #   3. تشغيل البوت وإدارة السوكت (Single Instance)
 # ===============================================
 
+async def post_init(application):
+    """دالة تُنفَّذ فور إقلاع التطبيق للتحقق من جاهزية البيئة"""
+    if FFMPEG_AVAILABLE:
+        logger.info(f"✅ ffmpeg جاهز مسبقاً للعمل عبر: {FFMPEG_PATH}")
+    else:
+        logger.warning("⚠️ ffmpeg غير جاهز عند الإقلاع.")
+
 def run_single_application():
     """تهيئة الجداول وتشغيل الـ Polling مع الحماية من التكرار 409 وتجاوز أخطاء الـ Threading"""
     global lock_socket
@@ -234,7 +247,13 @@ def run_single_application():
         logger.critical("❌ لا يمكن تشغيل البوت بدون BOT_TOKEN")
         return
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    # بناء التطبيق مع ربط دالة post_init للتحميل المسبق
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     # تسجيل الأوامر والمعالجات
     application.add_handler(CommandHandler("start", start_command))
