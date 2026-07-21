@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import glob
 import yt_dlp
 from telegram import Bot
 
@@ -46,30 +47,25 @@ async def download_media_yt_dlp(
     download_as_mp3: bool = False
 ):
     """
-    تحميل الوسائط باستخدام yt-dlp وإرسالها إلى المستخدم على تلغرام
+    تحميل الوسائط باستخدام yt-dlp وإرسالها مباشرة بدون الحاجة لـ FFmpeg
     """
-    # إنشاء مجلد مؤقت للتنزيلات إذا لم يكن موجوداً
     download_dir = "downloads"
     os.makedirs(download_dir, exist_ok=True)
     
+    # قالب حفظ الملف باسم المعرف فريد لمنع التداخل
     out_template = os.path.join(download_dir, "%(id)s.%(ext)s")
 
-    # إعدادات yt-dlp بحسب خيار التحميل (صوت أو فيديو)
+    # إعدادات التنزيل المباشر المعتمدة على السيرفرات دون معالجة Postprocessing
     if download_as_mp3:
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': out_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
             'quiet': True,
             'no_warnings': True,
         }
     else:
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'best[ext=mp4]/best',
             'outtmpl': out_template,
             'quiet': True,
             'no_warnings': True,
@@ -80,21 +76,29 @@ async def download_media_yt_dlp(
     def _extract_and_download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            video_id = info.get('id')
+            title = info.get('title', 'Media')
+            
+            # البحث عن الملف الذي تم تنزيله باستخدام ID المقترن به
+            search_pattern = os.path.join(download_dir, f"{video_id}.*")
+            matching_files = glob.glob(search_pattern)
+            
+            if matching_files:
+                return matching_files[0], title
+            
+            # خيار احتياطي في حال عدم تطابق الامتداد
             filename = ydl.prepare_filename(info)
-            if download_as_mp3:
-                # تغيير الامتداد إلى mp3 بعد المعالجة بواسطة FFmpeg
-                base, _ = os.path.splitext(filename)
-                filename = base + ".mp3"
-            return filename, info.get('title', 'Media')
+            return filename, title
 
+    file_path = None
     try:
-        # تشغيل التنزيل داخل Executor لتجنب حظر Event Loop الخاطف للـ Asyncio
+        # تشغيل التنزيل داخل Executor حتى لا يتأثر الأداء العام للبوت
         file_path, title = await loop.run_in_executor(None, _extract_and_download)
 
-        if not os.path.exists(file_path):
+        if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError("لم يتم العثور على الملف بعد التنزيل.")
 
-        # إرسال الملف عبر التلغرام
+        # إرسال الملف بناءً على الخيار المحدد
         with open(file_path, 'rb') as media_file:
             if download_as_mp3:
                 await bot.send_audio(
@@ -112,7 +116,7 @@ async def download_media_yt_dlp(
                     parse_mode='Markdown'
                 )
 
-        # حذف رسالة "جارٍ التحميل..." بعد النجاح
+        # حذف رسالة "جارٍ التحميل..." عند الانتهاء
         try:
             await bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
         except Exception:
@@ -120,20 +124,19 @@ async def download_media_yt_dlp(
 
     except Exception as e:
         logger.error(f"خطأ أثناء معالجة الرابط {url}: {e}")
-        # تحديث رسالة الحالة بإبلاغ المستخدم بالخطأ
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
-                text=f"❌ **حدث خطأ أثناء التحميل:**\n`{str(e)[:100]}`",
+                text=f"❌ **حدث خطأ أثناء التحميل:**\n`{str(e).splitlines()[0]}`",
                 parse_mode='Markdown'
             )
         except Exception:
             pass
 
     finally:
-        # تنظيف الملفات المؤقتة من المجلد بعد الإرسال
-        if 'file_path' in locals() and os.path.exists(file_path):
+        # إزالة الملفات المؤقتة من المجلد فور إرسالها
+        if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except Exception as clean_err:
