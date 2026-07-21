@@ -34,7 +34,6 @@ def clean_title(title: str) -> str:
     if not title:
         return ""
     
-    # فلترة عناوين تيك توك وانستغرام التلقائية
     if re.search(r'TikTok video #\d+', title, re.IGNORECASE):
         return ""
     if re.search(r'Video by', title, re.IGNORECASE):
@@ -55,40 +54,72 @@ async def download_media_yt_dlp(
     
     out_template = os.path.join(download_dir, "%(id)s.%(ext)s")
 
+    # التعديل الأقوى: إعدادات متقدمة جداً لمنع كشف السيرفرات والتغلب على حظر إنستغرام
+    base_headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Dest': 'document',
+    }
+
+    # الإعدادات الأساسية الشاملة
+    ydl_opts_primary = {
+        'outtmpl': out_template,
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'check_formats': False,
+        'extractor_args': {
+            'instagram': {
+                'refer_to_author': True,
+            }
+        },
+        'http_headers': base_headers,
+    }
+
     if download_as_mp3:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': out_template,
-            'quiet': True,
-            'no_warnings': True,
-        }
+        ydl_opts_primary['format'] = 'bestaudio/best'
     else:
-        ydl_opts = {
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': out_template,
-            'quiet': True,
-            'no_warnings': True,
-        }
+        ydl_opts_primary['format'] = 'best[ext=mp4]/best'
 
     loop = asyncio.get_running_loop()
     
     def _extract_and_download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_id = info.get('id')
-            raw_title = info.get('title', '')
+        # المحاولة الأولى بالخيارات المتقدمة
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_primary) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_id = info.get('id')
+                raw_title = info.get('title', '')
+                cleaned = clean_title(raw_title)
+                
+                search_pattern = os.path.join(download_dir, f"{video_id}.*")
+                matching_files = glob.glob(search_pattern)
+                if matching_files:
+                    return matching_files[0], cleaned
+                return ydl.prepare_filename(info), cleaned
+        except Exception as primary_error:
+            logger.warning(f"المحاولة الأولى فشلت: {primary_error}، جاري بدء المحاولة البديلة...")
             
-            # تنظيف العنوان
-            cleaned = clean_title(raw_title)
+            # المحاولة الثانية (Fall-back) بتغيير المتصفح والمستخرج للتغلب على الحظر القوي
+            ydl_opts_secondary = ydl_opts_primary.copy()
+            ydl_opts_secondary['http_headers']['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            ydl_opts_secondary['format'] = 'best'
             
-            search_pattern = os.path.join(download_dir, f"{video_id}.*")
-            matching_files = glob.glob(search_pattern)
-            
-            if matching_files:
-                return matching_files[0], cleaned
-            
-            filename = ydl.prepare_filename(info)
-            return filename, cleaned
+            with yt_dlp.YoutubeDL(ydl_opts_secondary) as ydl_sec:
+                info = ydl_sec.extract_info(url, download=True)
+                video_id = info.get('id')
+                raw_title = info.get('title', '')
+                cleaned = clean_title(raw_title)
+                
+                search_pattern = os.path.join(download_dir, f"{video_id}.*")
+                matching_files = glob.glob(search_pattern)
+                if matching_files:
+                    return matching_files[0], cleaned
+                return ydl_sec.prepare_filename(info), cleaned
 
     file_path = None
     try:
@@ -104,7 +135,6 @@ async def download_media_yt_dlp(
             [InlineKeyboardButton("🚀 مشاركة مع الأصدقاء", url=share_url)]
         ])
 
-        # صياغة النص النهائي للوصف: إن وجد عنوان حقيقي يظهر، وإلا يكتفي باليوزر فقط
         if download_as_mp3:
             caption_text = f"🎵 **{title}**\n\n@Seagebot" if title else "@Seagebot"
             with open(file_path, 'rb') as media_file:
@@ -138,7 +168,7 @@ async def download_media_yt_dlp(
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg_id,
-                text=f"❌ **حدث خطأ أثناء التحميل:**\n`{str(e).splitlines()[0]}`",
+                text="❌ **تعذر تنزيل هذا المنشور.**\nقد يكون الحساب خاصاً (Private) أو يفرض إنستغرام حماية مؤقتة على الرابط.",
                 parse_mode='Markdown'
             )
         except Exception:
