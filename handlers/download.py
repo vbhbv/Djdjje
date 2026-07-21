@@ -3,21 +3,16 @@ import json
 import logging
 import asyncio
 import glob
+import re
 import urllib.parse
 import yt_dlp
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 
 logger = logging.getLogger(__name__)
 
-# مسار ملف JSON لتخزين الروابط مؤقتاً
 LINKS_FILE = "temp_links.json"
 
-# ===============================================
-#          1. إدارة الروابط المؤقتة (JSON)
-# ===============================================
-
 def load_links() -> dict:
-    """تحميل الروابط المحفوظة مؤقتاً من ملف JSON"""
     if not os.path.exists(LINKS_FILE):
         return {}
     try:
@@ -28,16 +23,24 @@ def load_links() -> dict:
         return {}
 
 def save_links(links: dict):
-    """حفظ الروابط في ملف JSON"""
     try:
         with open(LINKS_FILE, "w", encoding="utf-8") as f:
             json.dump(links, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"خطأ أثناء حفظ ملف الروابط: {e}")
 
-# ===============================================
-#          2. دالة التحميل والمعالجة الرئيسية
-# ===============================================
+def clean_title(title: str) -> str:
+    """تنظيف العناوين التلقائية والكلايش المزعجة من المنصات"""
+    if not title:
+        return ""
+    
+    # فلترة عناوين تيك توك وانستغرام التلقائية
+    if re.search(r'TikTok video #\d+', title, re.IGNORECASE):
+        return ""
+    if re.search(r'Video by', title, re.IGNORECASE):
+        return ""
+    
+    return title.strip()
 
 async def download_media_yt_dlp(
     bot: Bot, 
@@ -47,16 +50,11 @@ async def download_media_yt_dlp(
     status_msg_id: int, 
     download_as_mp3: bool = False
 ):
-    """
-    تحميل الوسائط باستخدام yt-dlp وإرسالها مباشرة مع زر المشاركة ويوزر البوت
-    """
     download_dir = "downloads"
     os.makedirs(download_dir, exist_ok=True)
     
-    # قالب حفظ الملف باسم المعرف فريد لمنع التداخل
     out_template = os.path.join(download_dir, "%(id)s.%(ext)s")
 
-    # إعدادات التنزيل المباشر
     if download_as_mp3:
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -78,49 +76,49 @@ async def download_media_yt_dlp(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_id = info.get('id')
-            title = info.get('title', 'Media')
+            raw_title = info.get('title', '')
             
-            # البحث عن الملف الذي تم تنزيله باستخدام ID المقترن به
+            # تنظيف العنوان
+            cleaned = clean_title(raw_title)
+            
             search_pattern = os.path.join(download_dir, f"{video_id}.*")
             matching_files = glob.glob(search_pattern)
             
             if matching_files:
-                return matching_files[0], title
+                return matching_files[0], cleaned
             
-            # خيار احتياطي في حال عدم تطابق الامتداد
             filename = ydl.prepare_filename(info)
-            return filename, title
+            return filename, cleaned
 
     file_path = None
     try:
-        # تشغيل التنزيل داخل Executor
         file_path, title = await loop.run_in_executor(None, _extract_and_download)
 
         if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError("لم يتم العثور على الملف بعد التنزيل.")
 
-        # تجهيز زر مشاركة البوت مع الأصدقاء
         share_text = urllib.parse.quote("جرب هذا البوت الممتاز لتنزيل الفيديوهات والصوتيات من مختلف المنصات! ⚡")
         share_url = f"https://t.me/share/url?url=https://t.me/Seagebot&text={share_text}"
         
         reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("مشاركة مع الأصدقاء", url=share_url)]
+            [InlineKeyboardButton("🚀 مشاركة مع الأصدقاء", url=share_url)]
         ])
 
-        # إرسال الملف بناءً على الخيار المحدد مع يوزر البوت وزر المشاركة
-        with open(file_path, 'rb') as media_file:
-            if download_as_mp3:
-                caption_text = f"🎵 **{title}**\n\n@Seagebot"
+        # صياغة النص النهائي للوصف: إن وجد عنوان حقيقي يظهر، وإلا يكتفي باليوزر فقط
+        if download_as_mp3:
+            caption_text = f"🎵 **{title}**\n\n@Seagebot" if title else "@Seagebot"
+            with open(file_path, 'rb') as media_file:
                 await bot.send_audio(
                     chat_id=chat_id,
                     audio=media_file,
-                    title=title,
+                    title=title or "Audio",
                     caption=caption_text,
                     parse_mode='Markdown',
                     reply_markup=reply_markup
                 )
-            else:
-                caption_text = f"🎥 **{title}**\n\n@Seagebot"
+        else:
+            caption_text = f"🎥 **{title}**\n\n@Seagebot" if title else "@Seagebot"
+            with open(file_path, 'rb') as media_file:
                 await bot.send_video(
                     chat_id=chat_id,
                     video=media_file,
@@ -129,7 +127,6 @@ async def download_media_yt_dlp(
                     reply_markup=reply_markup
                 )
 
-        # حذف رسالة "جارٍ التحميل..." عند الانتهاء
         try:
             await bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
         except Exception:
@@ -148,7 +145,6 @@ async def download_media_yt_dlp(
             pass
 
     finally:
-        # إزالة الملفات المؤقتة من المجلد فور إرسالها
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
